@@ -1,0 +1,118 @@
+{
+  "id": "wf_fin_reconcile_v1",
+  "name": "Financial Reconciliation & Ledger Settlement",
+  "version": 1,
+  "nodes": [
+    {
+      "id": "fetch_transactions",
+      "name": "Fetch Batch Transactions",
+      "kind": {
+        "type": "Task",
+        "handler": "fetch_transactions"
+      },
+      "sideEffect": "ReadOnly",
+      "retryPolicy": {
+        "maxAttempts": 3,
+        "backoff": { "type": "Exponential", "initialMs": 1000, "maxMs": 10000, "multiplier": 2 },
+        "retryOn": ["NetworkTransient", "RateLimit"]
+      },
+      "timeoutSecs": 30,
+      "checkpoint": true
+    },
+    {
+      "id": "ai_categorize",
+      "name": "AI Ledger Categorization & Balancing",
+      "kind": {
+        "type": "AI",
+        "provider": "mock",
+        "model": "gpt-4o",
+        "promptTemplate": "Extract and balance ledger debit and credit entries for transaction batch",
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "debits": { "type": "number" },
+            "credits": { "type": "number" },
+            "settlement_confirmed": { "type": "boolean" }
+          },
+          "required": ["debits", "credits", "settlement_confirmed"]
+        },
+        "budget": {
+          "maxTokens": 2000,
+          "maxCostUsd": 0.05
+        }
+      },
+      "sideEffect": "Idempotent",
+      "retryPolicy": {
+        "maxAttempts": 3,
+        "backoff": { "type": "Exponential", "initialMs": 1000, "maxMs": 10000, "multiplier": 2 },
+        "retryOn": ["NetworkTransient", "RateLimit", "LLMOutputMalformed"]
+      },
+      "timeoutSecs": 45,
+      "checkpoint": true
+    },
+    {
+      "id": "ledger_commit",
+      "name": "Commit to General Ledger",
+      "kind": {
+        "type": "Task",
+        "handler": "ledger_commit"
+      },
+      "sideEffect": "Compensatable",
+      "retryPolicy": {
+        "maxAttempts": 3,
+        "backoff": { "type": "Exponential", "initialMs": 1000, "maxMs": 10000, "multiplier": 2 },
+        "retryOn": ["NetworkTransient", "RateLimit"]
+      },
+      "timeoutSecs": 30,
+      "checkpoint": true
+    }
+  ],
+  "edges": [
+    {
+      "fromNode": "fetch_transactions",
+      "fromPort": "output",
+      "toNode": "ai_categorize",
+      "toPort": "input"
+    },
+    {
+      "fromNode": "ai_categorize",
+      "fromPort": "output",
+      "toNode": "ledger_commit",
+      "toPort": "input"
+    }
+  ],
+  "invariants": [
+    {
+      "id": "inv_balance_zero",
+      "description": "Financial Invariant: Debits must exactly equal Credits",
+      "kind": {
+        "type": "NodeOutput",
+        "nodeId": "ai_categorize",
+        "expression": "debits == credits"
+      },
+      "severity": "Critical"
+    },
+    {
+      "id": "inv_settlement_confirmed",
+      "description": "Compliance Invariant: Settlement confirmation must exist before ledger commit",
+      "kind": {
+        "type": "NodeOutput",
+        "nodeId": "ai_categorize",
+        "expression": "settlement_confirmed == true"
+      },
+      "severity": "Critical"
+    }
+  ],
+  "policies": {
+    "autonomyLevel": 3,
+    "recoveryPolicies": [],
+    "maxRecoveryAttempts": 3,
+    "requireInvariantCheck": true,
+    "requireSandboxVerification": true
+  },
+  "metadata": {
+    "description": "Production financial transaction settlement pipeline with verified invariant checks",
+    "createdAt": "2026-09-16T00:00:00Z",
+    "tags": ["fintech", "reconciliation", "ledger", "mission-critical"]
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "name": "@modusflow/omega",
+  "version": "0.1.0",
+  "description": "Reliability and autonomous recovery substrate for production AI workflows",
+  "type": "module",
+  "bin": {
+    "omega": "./bin/omega.mjs"
+  },
+  "scripts": {
+    "start": "tsx bin/omega.ts",
+    "benchmark": "tsx bin/omega.ts benchmark",
+    "test": "tsx examples/universal-agent-protection.ts",
+    "test:chaos": "tsx tests/chaos/real-world-battle-test.ts",
+    "test:extreme": "tsx tests/chaos/extreme-reality-test.ts",
+    "test:transparent": "tsx tests/chaos/transparent-interception-test.ts",
+    "test:cegis": "tsx tests/chaos/cegis-self-healing-test.ts",
+    "test:all": "npm test && npm run test:chaos && npm run test:extreme && npm run test:transparent && npm run test:cegis"
+  },
+  "keywords": [
+    "ai-agent",
+    "workflow-reliability",
+    "autonomous-recovery",
+    "durable-execution",
+    "invariants",
+    "agentic-infrastructure",
+    "side-effects"
+  ],
+  "author": "ModusFlow Team",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.13"
+  }
+}
