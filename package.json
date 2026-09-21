@@ -14,7 +14,9 @@
     "test:extreme": "tsx tests/chaos/extreme-reality-test.ts",
     "test:transparent": "tsx tests/chaos/transparent-interception-test.ts",
     "test:cegis": "tsx tests/chaos/cegis-self-healing-test.ts",
-    "test:all": "npm test && npm run test:chaos && npm run test:extreme && npm run test:transparent && npm run test:cegis"
+    "test:replication": "tsx tests/chaos/distributed-wal-replication-test.ts",
+    "test:python": "python sdk/python/test_omega_protect.py",
+    "test:all": "npm test && npm run test:chaos && npm run test:extreme && npm run test:transparent && npm run test:cegis && npm run test:replication && npm run test:python"
   },
   "keywords": [
     "ai-agent",

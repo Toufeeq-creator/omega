@@ -8,3 +8,5 @@ dist/
 *.log
 .env
 rust-core/
+__pycache__/
+*.pyc

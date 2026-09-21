@@ -1,4 +1,12 @@
 import { createHash } from "node:crypto";
+import {
+  PrattParser,
+  CodeGenerator,
+  extractPropertyChainFromAST,
+  findMemberExpressionsInAST,
+  ASTNode,
+  MemberExpressionNode,
+} from "./ast-parser.ts";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CEGIS AST Self-Healing Engine
@@ -151,73 +159,93 @@ export function extractSourceLocation(stackTrace: string): { filePath: string; l
   return null;
 }
 
-// ─── Lightweight Expression Parser ──────────────────────────────────────
+// ─── Formal Pratt AST Expression Parser ──────────────────────────────────
 
 /**
- * Parse a source line into a lightweight AST representation.
- * Handles member access chains, optional chaining, function calls, and common patterns.
- * Zero external dependencies — uses pattern matching only.
+ * Parse arbitrary source code into a formal AST node tree.
+ */
+export function parseAST(source: string): ASTNode {
+  const parser = new PrattParser(source);
+  return parser.parse();
+}
+
+/**
+ * Parse a source line into an AST-backed ExpressionNode representation.
+ * Powered by zero-dependency Pratt recursive-descent parser.
  */
 export function parseExpression(source: string): ExpressionNode {
   const trimmed = source.trim();
 
-  // Member access chain: obj.prop1.prop2.prop3 or obj?.prop1?.prop2
-  const memberAccessRegex = /^([a-zA-Z_$][a-zA-Z0-9_$]*)(\??\.([a-zA-Z_$][a-zA-Z0-9_$]*))+$/;
-  if (memberAccessRegex.test(trimmed)) {
-    const parts = trimmed.split(/\??\./).filter(Boolean);
-    const hasOptional = trimmed.includes("?.");
-    return {
-      kind: hasOptional ? "optional_chain" : "member_access",
-      source: trimmed,
-      children: parts.map(p => ({ kind: "identifier" as const, source: p, children: [] })),
-      propertyChain: parts,
-    };
+  try {
+    const ast = parseAST(trimmed);
+
+    if (ast.type === "MemberExpression") {
+      const chain = extractPropertyChainFromAST(ast);
+      return {
+        kind: ast.optional ? "optional_chain" : "member_access",
+        source: trimmed,
+        children: chain.map(p => ({ kind: "identifier" as const, source: p, children: [] })),
+        propertyChain: chain,
+      };
+    }
+
+    if (ast.type === "CallExpression") {
+      return {
+        kind: "function_call",
+        source: trimmed,
+        children: [
+          { kind: "identifier", source: CodeGenerator.generate(ast.callee), children: [] },
+        ],
+      };
+    }
+
+    if (ast.type === "Literal") {
+      return {
+        kind: "literal",
+        source: trimmed,
+        children: [],
+      };
+    }
+
+    if (ast.type === "Identifier") {
+      return {
+        kind: "identifier",
+        source: trimmed,
+        children: [],
+      };
+    }
+  } catch {
+    // Graceful fallback for non-standalone snippets
   }
 
-  // Function call: funcName(args)
-  const funcCallRegex = /^([a-zA-Z_$][a-zA-Z0-9_$.]*)\s*\((.*)?\)$/s;
-  const funcMatch = trimmed.match(funcCallRegex);
-  if (funcMatch) {
-    return {
-      kind: "function_call",
-      source: trimmed,
-      children: [
-        { kind: "identifier", source: funcMatch[1], children: [] },
-      ],
-    };
-  }
-
-  // Identifier
-  if (/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(trimmed)) {
-    return {
-      kind: "identifier",
-      source: trimmed,
-      children: [],
-    };
-  }
-
-  // Literal (number, string, boolean)
-  if (/^(["'`].*["'`]|\d+(\.\d+)?|true|false|null|undefined)$/.test(trimmed)) {
-    return {
-      kind: "literal",
-      source: trimmed,
-      children: [],
-    };
-  }
-
-  // Default: treat as opaque expression
+  // Fallback for custom fragments
+  const parts = trimmed.split(/\??\./).filter(Boolean);
   return {
-    kind: "identifier",
+    kind: trimmed.includes("?.") ? "optional_chain" : parts.length > 1 ? "member_access" : "identifier",
     source: trimmed,
-    children: [],
+    children: parts.map(p => ({ kind: "identifier" as const, source: p, children: [] })),
+    propertyChain: parts,
   };
 }
 
 /**
- * Extract all member access expressions from a source line.
- * Finds patterns like `data.field`, `response.body.items[0].name`, etc.
+ * Extract all member access expressions from a source line using the Pratt AST parser.
+ * Supports dot notation (`a.b.c`), bracket notation (`a["b"][0]`), and optional chaining (`a?.b`).
  */
 export function extractMemberAccessExpressions(line: string): string[] {
+  try {
+    const ast = parseAST(line);
+    const memberNodes = findMemberExpressionsInAST(ast);
+    if (memberNodes.length > 0) {
+      // Return unparsed member expressions, sorted by longest chain first
+      const generated = memberNodes.map(m => CodeGenerator.generate(m));
+      // Deduplicate and filter out sub-expressions that are contained inside larger ones
+      return [...new Set(generated)];
+    }
+  } catch {
+    // Fall back to robust regex scanner if line is a partial code fragment
+  }
+
   const regex = /\b([a-zA-Z_$][a-zA-Z0-9_$]*(?:\??\.[a-zA-Z_$][a-zA-Z0-9_$]*)+(?:\??\[[\w'"]+\])*)/g;
   const matches: string[] = [];
   let match: RegExpExecArray | null;

@@ -10,7 +10,9 @@ import {
   parseExpression,
   extractMemberAccessExpressions,
   extractSourceLocation,
+  parseAST,
 } from "../../src/recovery/cegis-engine.ts";
+import { PrattParser, CodeGenerator } from "../../src/recovery/ast-parser.ts";
 
 // Colors for terminal reporting
 const c = {
@@ -254,6 +256,32 @@ async function runCEGISTestSuite() {
     }
 
     console.log(`  ${c.green}PASSED${c.reset} — Attestation is deterministic and tamper-evident: ${cert1.attestationHash}`);
+    passed++;
+  } catch (err: any) {
+    console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
+    failed++;
+  }
+
+  // ── TEST 7: Pratt AST Formal Round-Trip & Bracket Indexing ─────────────────
+  try {
+    console.log(`\n${c.cyan}[TEST 7]${c.reset} Pratt AST Engine — Deep Bracket Indexing, Nullish Coalesce & Statements`);
+
+    // Statement with bracket notation and arithmetic
+    const sourceCode = 'const amount = (payload["data"]?.[0]?.amount_cents / 100) ?? 0;';
+    const ast = parseAST(sourceCode);
+
+    if (ast.type !== "VariableDeclaration") {
+      throw new Error(`Expected VariableDeclaration AST, got ${ast.type}`);
+    }
+
+    const unparsed = CodeGenerator.generate(ast);
+    if (!unparsed.includes('payload["data"]?.[0]?.amount_cents') || !unparsed.includes("/ 100")) {
+      throw new Error(`Unparsed code deviation: ${unparsed}`);
+    }
+
+    console.log(`  ${c.green}PASSED${c.reset} — Pratt AST parsed statement, optional bracket chain, arithmetic, and unparsed cleanly:`);
+    console.log(`  ${c.yellow}         Input:  ${sourceCode}${c.reset}`);
+    console.log(`  ${c.yellow}         Output: ${unparsed}${c.reset}`);
     passed++;
   } catch (err: any) {
     console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);

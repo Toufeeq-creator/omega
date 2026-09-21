@@ -25,11 +25,13 @@ export type { InterceptionContext, RecordedWireCall } from "./middleware/transpa
 export { FailureClassifier } from "./recovery/classifier.ts";
 export type { ClassificationResult, RawFailureContext } from "./recovery/classifier.ts";
 
-export { CEGISEngine } from "./recovery/cegis-engine.ts";
+export { CEGISEngine, parseAST } from "./recovery/cegis-engine.ts";
 export type {
   CandidateMutation, CEGISRepairResult, AttestationCertificate,
   CounterExample, MutationStrategy, ExpressionNode,
 } from "./recovery/cegis-engine.ts";
+export { PrattParser, CodeGenerator } from "./recovery/ast-parser.ts";
+export type { ASTNode, MemberExpressionNode } from "./recovery/ast-parser.ts";
 
 export { InvariantEvaluator } from "./recovery/invariant-eval.ts";
 export { FailureClass } from "./core/errors.ts";
@@ -37,5 +39,7 @@ export { AutonomyLevel } from "./core/policies.ts";
 export type { Invariant, InvariantResult } from "./core/invariants.ts";
 export type { OmegaIR, IRNode, IREdge } from "./core/ir.ts";
 export { SqliteOmegaStore } from "./store/sqlite.ts";
+export { ReplicationNode, VectorClock, FramedSocket } from "./store/replication.ts";
+export type { ReplicationPacket, ReplicationNodeConfig } from "./store/replication.ts";
 export { ExecutionEngine } from "./runtime/engine.ts";
 export { ReplayEngine } from "./runtime/replay.ts";

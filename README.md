@@ -96,8 +96,11 @@ export const protectedStep = omega.protect(
 );
 ```
 
-#### CEGIS AST Self-Healing Engine
-When APIs silently change schema, Omega uses Counterexample-Guided Inductive Synthesis (CEGIS) to surgically isolate failing AST nodes, synthesize candidate repairs, fuzz invariants in an isolated sandbox, and output verified Git diffs with SHA-256 cryptographic attestation.
+#### Pratt AST Self-Healing Engine
+When APIs silently change schema or field paths drift, Omega uses a formal, zero-dependency Pratt AST parser and Counterexample-Guided Inductive Synthesis (CEGIS) to surgically isolate failing AST nodes, synthesize candidate mutations (deep bracket indexing, unit conversions, nullish coalescing), fuzz invariants in an isolated sandbox, and output verified Git diffs with SHA-256 cryptographic attestation.
+
+#### Distributed WAL Replication Mesh
+For high-availability clusters, Omega streams SQLite Write-Ahead Log events over length-prefixed TCP sockets with **Vector Clocks**. If a leader node crashes, standby followers execute lease-based failover election and continue replays with zero data drift.
 
 ---
 
@@ -106,23 +109,27 @@ When APIs silently change schema, Omega uses Counterexample-Guided Inductive Syn
 Omega includes real-world distributed chaos test suites testing over actual TCP sockets, real disk files, and live internet HTTPS connections:
 
 ```bash
-# Run the complete test suite (all 23 chaos & reliability scenarios)
+# Run the complete master test suite (all 34 chaos & reliability scenarios)
 npm run test:all
 
 # Or run individual specialized suites:
 npm run test:transparent   # Zero-proxy interception & sandbox replay virtualization
-npm run test:cegis         # AST counterexample synthesis & SHA-256 attestation
+npm run test:cegis         # Pratt AST counterexample synthesis & SHA-256 attestation
+npm run test:replication   # Distributed WAL TCP streaming & multi-node failover
+npm run test:python        # Python native AST self-healing & ContextVars interception
 npm run test:chaos         # Live TCP socket drops & double-charging prevention
 npm run test:extreme       # Ambiguous two-phase commit timeouts & 50-worker WAL stress
 ```
 
-### Scorecard (23 / 23 Scenarios Passing)
+### Scorecard (34 / 34 Scenarios Passing)
 ```text
 ════════════════════════════════════════════════════════════════════════════
-MASTER TEST SCORECARD: 23 / 23 PASSED (100%)
+MASTER TEST SCORECARD: 34 / 34 PASSED (100%)
 - Live Network Double-Charging Prevention: VERIFIED (0 Duplicate Charges)
 - Transparent Network Interception:        VERIFIED (0 Real Hits in Sandbox)
-- CEGIS AST Code Synthesis & Repair:       VERIFIED (SHA-256 Attestation)
+- Pratt AST Code Synthesis & Repair:       VERIFIED (SHA-256 Attestation)
+- Distributed WAL Replication Mesh:        VERIFIED (Vector Clocks & TCP Failover)
+- Python Native AST CEGIS Parity:          VERIFIED (Full Feature Parity)
 - Live Upstream Schema Drift Adaptation:   VERIFIED (Dynamic Lens)
 - Hard TCP Socket Drop Recovery:          VERIFIED (ECONNRESET handled)
 - Post-Crash Disk SQLite Replay:          VERIFIED (0 State Drift)
