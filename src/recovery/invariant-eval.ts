@@ -71,10 +71,32 @@ export class InvariantEvaluator {
   }
 
   /**
+   * Convert currency/float amounts to exact integer cents to eliminate floating-point precision drift.
+   * e.g. 0.1 + 0.2 becomes 10 + 20 = 30 (exact integer math).
+   */
+  static toIntegerCents(val: number): number {
+    return Math.round(val * 100);
+  }
+
+  /**
+   * Safely navigate nested property paths without throwing Cannot read properties of undefined.
+   */
+  static safeGet(obj: any, path: string): unknown {
+    if (obj == null) return undefined;
+    const parts = path.split(".");
+    let current = obj;
+    for (const part of parts) {
+      if (current == null || typeof current !== "object") return undefined;
+      current = current[part];
+    }
+    return current;
+  }
+
+  /**
    * Strictly parse and validate numeric financial values.
    * Defends against JSON Type Poisoning (null, undefined, non-numeric strings, NaN, Infinity).
    */
-  private static parseStrictNumber(val: unknown): number | null {
+  static parseStrictNumber(val: unknown): number | null {
     if (typeof val === "number") {
       return !isNaN(val) && isFinite(val) ? val : null;
     }
@@ -89,29 +111,36 @@ export class InvariantEvaluator {
     expression: string,
     data: any
   ): { passed: boolean; actualValue?: unknown; message?: string } {
-    const expr = expression.trim();
+    try {
+      const expr = expression.trim();
 
-    // 1. Financial invariant: debits == credits
-    if (expr === "debits == credits") {
-      const debits = InvariantEvaluator.parseStrictNumber(data?.debits);
-      const credits = InvariantEvaluator.parseStrictNumber(data?.credits);
+      // 1. Financial invariant: debits == credits (Exact Integer Cents + Epsilon)
+      if (expr === "debits == credits") {
+        const debits = InvariantEvaluator.parseStrictNumber(InvariantEvaluator.safeGet(data, "debits"));
+        const credits = InvariantEvaluator.parseStrictNumber(InvariantEvaluator.safeGet(data, "credits"));
 
-      // JSON Type Poisoning Defense: reject if values are null, undefined, or unparseable
-      if (debits === null || credits === null) {
+        // JSON Type Poisoning Defense: reject if values are null, undefined, or unparseable
+        if (debits === null || credits === null) {
+          return {
+            passed: false,
+            actualValue: { debits: data?.debits, credits: data?.credits },
+            message: `JSON Type Poisoning detected: debits or credits is not a valid finite number (debits: ${JSON.stringify(data?.debits)}, credits: ${JSON.stringify(data?.credits)})`,
+          };
+        }
+
+        // Floating-Point Precision Drift Defense: compare in exact integer cents
+        const debitsCents = InvariantEvaluator.toIntegerCents(debits);
+        const creditsCents = InvariantEvaluator.toIntegerCents(credits);
+        const passed = debitsCents === creditsCents || Math.abs(debits - credits) < 0.0001;
+
         return {
-          passed: false,
-          actualValue: { debits: data?.debits, credits: data?.credits },
-          message: `JSON Type Poisoning detected: debits or credits is not a valid finite number (debits: ${JSON.stringify(data?.debits)}, credits: ${JSON.stringify(data?.credits)})`,
+          passed,
+          actualValue: { debits, credits, debitsCents, creditsCents },
+          message: passed
+            ? `Debits balance Credits exactly ($${debits.toFixed(2)})`
+            : `Debits ($${debits.toFixed(2)}) != Credits ($${credits.toFixed(2)})`,
         };
       }
-
-      const passed = Math.abs(debits - credits) < 0.001;
-      return {
-        passed,
-        actualValue: { debits, credits },
-        message: passed ? `Debits balance Credits exactly ($${debits.toFixed(2)})` : `Debits ($${debits.toFixed(2)}) != Credits ($${credits.toFixed(2)})`,
-      };
-    }
 
     // 2. Confidence threshold: confidence >= 0.8
     if (expr.includes("confidence >=")) {
@@ -154,6 +183,37 @@ export class InvariantEvaluator {
       };
     }
 
+    // 5. Dynamic property comparisons (e.g. data.totals.grandTotal > 0)
+    const dynamicMatch = expr.match(/^([a-zA-Z0-9_.]+)\s*(===|==|>|<|>=|<=)\s*(.+)$/);
+    if (dynamicMatch) {
+      const [, path, op, rawTarget] = dynamicMatch;
+      const cleanPath = path.replace(/^data\./, "");
+      const val = InvariantEvaluator.safeGet(data, cleanPath);
+      const target = Number(rawTarget.trim());
+
+      if (val === undefined || val === null) {
+        return {
+          passed: false,
+          actualValue: val,
+          message: `Safe Navigation: property '${path}' is missing or undefined`,
+        };
+      }
+
+      const numVal = Number(val);
+      let passed = false;
+      if (op === ">") passed = numVal > target;
+      else if (op === ">=") passed = numVal >= target;
+      else if (op === "<") passed = numVal < target;
+      else if (op === "<=") passed = numVal <= target;
+      else if (op === "==" || op === "===") passed = numVal === target;
+
+      return {
+        passed,
+        actualValue: val,
+        message: passed ? `Constraint '${expr}' satisfied` : `Constraint '${expr}' failed (actual: ${val})`,
+      };
+    }
+
     // Default: verify non-null
     const isNotNull = data !== null && data !== undefined;
     return {
@@ -161,5 +221,15 @@ export class InvariantEvaluator {
       actualValue: data,
       message: isNotNull ? "Output validated" : "Output is empty/null",
     };
+  } catch (evalErr: any) {
+    // Safe fallback: NEVER crash the reliability engine on unhandled access errors
+    return {
+      passed: false,
+      actualValue: undefined,
+      message: `Invariant evaluation safely caught exception: ${evalErr.message}`,
+    };
   }
 }
+}
+
+

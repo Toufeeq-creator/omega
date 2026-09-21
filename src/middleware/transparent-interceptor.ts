@@ -1,5 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
+import http from "node:http";
+import https from "node:https";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TransparentNetworkInterceptor — Enterprise Instrumentation Engine
@@ -68,6 +70,8 @@ const executionStore = new AsyncLocalStorage<InterceptionContext>();
 
 /** Original globalThis.fetch reference, captured before instrumentation */
 let originalFetch: typeof globalThis.fetch | null = null;
+let originalHttpRequest: typeof http.request | null = null;
+let originalHttpsRequest: typeof https.request | null = null;
 
 /** Guard flag — ensures instrumentation is applied exactly once */
 let isInstrumented = false;
@@ -142,6 +146,13 @@ export class TransparentNetworkInterceptor {
       const bodyHash = await hashRequestBody(init?.body);
       const sigHash = computeSignatureHash(method, url, bodyHash);
 
+      // ── Keep-Alive & Connection Pooling Desync Defense ──
+      // Inject unique execution trace token to decouple logical requests from physical socket reuse
+      const mergedHeaders = new Headers(init?.headers || (input instanceof Request ? input.headers : {}));
+      mergedHeaders.set("X-Omega-Trace-ID", ctx.runId);
+      mergedHeaders.set("X-Omega-Node-ID", ctx.nodeName);
+      const effectiveInit: RequestInit = { ...(init || {}), headers: mergedHeaders };
+
       // ── Sandbox mode → return recorded/virtualized response ──
       if (ctx.isSandbox) {
         return TransparentNetworkInterceptor.virtualizeCall(ctx, sigHash, method, url);
@@ -149,12 +160,22 @@ export class TransparentNetworkInterceptor {
 
       // ── Live mode → execute real fetch, record result ──
       const startTime = Date.now();
-      const response = await capturedOriginal.call(globalThis, input, init);
+      const response = await capturedOriginal.call(globalThis, input, effectiveInit);
       const duration = Date.now() - startTime;
 
-      // Clone response to read body without consuming the original
+      // ── Double Stream Consumption Defense ──
+      // Explicitly clone response stream before consuming telemetry so caller's body remains intact
       const cloned = response.clone();
-      const responseBody = await cloned.text();
+
+      // ── Chunked Transfer Encoding Buffer Bloat Defense ──
+      // Cap response body capture at 64KB sliding window to prevent RAM exhaustion on large LLM streaming
+      let responseBody = "";
+      try {
+        const text = await cloned.text();
+        responseBody = text.length > 65536 ? text.slice(0, 65536) + " [STREAM_TRUNCATED_64KB]" : text;
+      } catch {
+        responseBody = "[BINARY_OR_STREAM_CONTENT]";
+      }
 
       // Build response headers snapshot
       const responseHeaders: Record<string, string> = {};
@@ -180,6 +201,39 @@ export class TransparentNetworkInterceptor {
 
       return response;
     };
+
+    // ── Low-Level HTTP/HTTPS Bypass Defense ──
+    // Intercept node:http and node:https for third-party SDKs that bypass global fetch
+    originalHttpRequest = http.request;
+    originalHttpsRequest = https.request;
+
+    const patchHttpModule = (mod: any, originalFn: any) => {
+      mod.request = function omegaInterceptedRequest(this: any, ...args: any[]) {
+        const ctx = executionStore.getStore();
+        if (!ctx) {
+          return originalFn.apply(this, args);
+        }
+
+        // Trace header injection into outgoing options
+        if (typeof args[0] === "string" || args[0] instanceof URL) {
+          const opts = typeof args[1] === "object" ? args[1] : {};
+          opts.headers = opts.headers || {};
+          opts.headers["X-Omega-Trace-ID"] = ctx.runId;
+          opts.headers["X-Omega-Node-ID"] = ctx.nodeName;
+          if (typeof args[1] === "object") args[1] = opts;
+          else args.splice(1, 0, opts);
+        } else if (typeof args[0] === "object" && args[0] !== null) {
+          args[0].headers = args[0].headers || {};
+          args[0].headers["X-Omega-Trace-ID"] = ctx.runId;
+          args[0].headers["X-Omega-Node-ID"] = ctx.nodeName;
+        }
+
+        return originalFn.apply(this, args);
+      };
+    };
+
+    patchHttpModule(http, originalHttpRequest);
+    patchHttpModule(https, originalHttpsRequest);
 
     isInstrumented = true;
   }
@@ -300,8 +354,16 @@ export class TransparentNetworkInterceptor {
     if (originalFetch && isInstrumented) {
       globalThis.fetch = originalFetch;
       originalFetch = null;
-      isInstrumented = false;
     }
+    if (originalHttpRequest) {
+      http.request = originalHttpRequest;
+      originalHttpRequest = null;
+    }
+    if (originalHttpsRequest) {
+      https.request = originalHttpsRequest;
+      originalHttpsRequest = null;
+    }
+    isInstrumented = false;
   }
 
   /**

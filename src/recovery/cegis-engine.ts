@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import fs from "node:fs";
 import {
   PrattParser,
   CodeGenerator,
@@ -683,9 +684,72 @@ export function generateAttestation(
  * 5. Repeat until a valid repair is found or max iterations reached
  * 6. Produce verified unified diff + SHA-256 attestation
  */
+/**
+ * Generate collision-free unique variable name to prevent Scope Creep Variable Shadowing.
+ */
+export function generateSafeVariableName(baseName: string, salt: string = ""): string {
+  const hash = createHash("sha256").update(`${baseName}_${salt}_${Date.now()}`).digest("hex").slice(0, 6);
+  return `_omega_healed_${baseName.replace(/[^a-zA-Z0-9_]/g, "_")}_${hash}`;
+}
+
+/**
+ * Advisory file lock on source files to prevent Concurrent Write Race Conflicts.
+ */
+export async function withAdvisoryFileLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
+  const lockFile = `${filePath}.omega.lock`;
+  let acquired = false;
+  const maxWaitMs = 5000;
+  const start = Date.now();
+
+  while (!acquired) {
+    try {
+      const fd = fs.openSync(lockFile, "wx");
+      fs.writeSync(fd, `${process.pid}\n${Date.now()}`);
+      fs.closeSync(fd);
+      acquired = true;
+    } catch (err: any) {
+      if (err.code === "EEXIST") {
+        if (Date.now() - start > maxWaitMs) {
+          try {
+            const stat = fs.statSync(lockFile);
+            if (Date.now() - stat.mtimeMs > 10000) {
+              fs.unlinkSync(lockFile);
+              continue;
+            }
+          } catch {}
+          throw new Error(`Lock acquisition timeout for file: ${filePath}`);
+        }
+        await new Promise((r) => setTimeout(r, 25));
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  try {
+    return await fn();
+  } finally {
+    try {
+      if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile);
+    } catch {}
+  }
+}
+
 export class CEGISEngine {
   /** Maximum number of CEGIS refinement iterations */
   static readonly MAX_ITERATIONS = 5;
+
+  /** Maximum automated heal attempts before tripping the cascade loop circuit breaker */
+  static readonly MAX_CASCADE_DEPTH = 3;
+  private static repairAttempts = new Map<string, number>();
+
+  static resetCircuitBreaker(targetKey?: string): void {
+    if (targetKey) {
+      CEGISEngine.repairAttempts.delete(targetKey);
+    } else {
+      CEGISEngine.repairAttempts.clear();
+    }
+  }
 
   /**
    * Run the full CEGIS repair loop.
@@ -705,6 +769,23 @@ export class CEGISEngine {
     sourceFileContent?: string,
     sourceFilePath?: string
   ): CEGISRepairResult {
+    // ── Infinite Cascade Loop Defense: Circuit Breaker ──
+    const targetKey = `${sourceFilePath || "ephemeral"}:${lineNumber}:${failingExpression}`;
+    const attempts = CEGISEngine.repairAttempts.get(targetKey) || 0;
+    if (attempts >= CEGISEngine.MAX_CASCADE_DEPTH) {
+      return {
+        repairFound: false,
+        iterationsPerformed: 0,
+        candidatesEvaluated: 0,
+        counterexamplesFound: [{
+          payload: crashPayload,
+          reason: `Cascade Loop Circuit Breaker TRIPPED: Max automated heal attempts (${CEGISEngine.MAX_CASCADE_DEPTH}) exceeded for '${targetKey}'. Halting automated modifications to prevent endless loops.`,
+        }],
+        auditTrail: [],
+      };
+    }
+    CEGISEngine.repairAttempts.set(targetKey, attempts + 1);
+
     const auditTrail: CandidateTestResult[] = [];
     const allCounterexamples: CounterExample[] = [];
     let iterationsPerformed = 0;

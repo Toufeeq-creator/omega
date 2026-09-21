@@ -294,6 +294,46 @@ def run_tests():
         print(f"  FAILED — {e}")
         failed += 1
 
+    # ── TEST 9: Circuit Breaker Cascade Loop Defense ─────────────────────────
+    try:
+        print("\n[TEST 9] Circuit Breaker Cascade Loop Defense (Max 3 Automated Heals)")
+        CEGISPythonEngine.reset_circuit_breaker()
+
+        source_sample = "def loop_fn(data):\n    return data['amount']\n"
+        payload_sample = {"data": {"nested": {"amount": 100}}}
+
+        # 3 attempts
+        for _ in range(3):
+            CEGISPythonEngine.repair_source(source_sample, "amount", payload_sample, [], "cascade.py")
+
+        # 4th attempt must trip circuit breaker
+        trip_res = CEGISPythonEngine.repair_source(source_sample, "amount", payload_sample, [], "cascade.py")
+        assert trip_res["repair_found"] is False, "Expected circuit breaker to halt repair"
+        assert "Circuit Breaker TRIPPED" in trip_res["error"], "Expected circuit breaker error message"
+
+        print("  PASSED — Circuit breaker successfully tripped at depth 3, preventing cascade modification loop.")
+        passed += 1
+    except Exception as e:
+        print(f"  FAILED — {e}")
+        failed += 1
+
+    # ── TEST 10: Python Floating-Point Precision Drift (0.1 + 0.2) ───────────
+    try:
+        print("\n[TEST 10] Floating-Point Precision Drift (0.1 + 0.2 == 0.3) & Safe Navigation")
+        # In Python float math: 0.1 + 0.2 == 0.30000000000000004
+        drift_data = {"debits": 0.1 + 0.2, "credits": 0.3}
+        assert evaluate_invariant("debits == credits", drift_data) is True, "Expected cent integer comparison to balance 0.1 + 0.2 == 0.3"
+
+        # Safe navigation on empty data
+        assert evaluate_invariant("debits == credits", {}) is False
+        assert evaluate_invariant("confidence >= 0.8", {}) is False
+
+        print("  PASSED — Floating-point precision drift resolved via integer cent logic; safe navigation enforced.")
+        passed += 1
+    except Exception as e:
+        print(f"  FAILED — {e}")
+        failed += 1
+
     print("\n" + "=" * 70)
     print(f"  PYTHON SUBSTRATE RESULTS: {passed} PASSED / {failed} FAILED")
     print("=" * 70 + "\n")

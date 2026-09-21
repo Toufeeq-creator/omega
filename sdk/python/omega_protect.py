@@ -86,6 +86,9 @@ def _omega_urlopen(url_or_req, *args, **kwargs):
     if isinstance(url_or_req, urllib.request.Request):
         url = url_or_req.full_url
         method = url_or_req.get_method()
+        # Keep-Alive & Connection Pooling Desync Defense: inject trace headers
+        url_or_req.add_header("X-Omega-Trace-ID", ctx.run_id)
+        url_or_req.add_header("X-Omega-Node-ID", ctx.node_name)
     else:
         url = str(url_or_req)
         method = "GET"
@@ -102,7 +105,8 @@ def _omega_urlopen(url_or_req, *args, **kwargs):
 
     # Live mode — execute real call, record result
     real_resp = _original_urlopen(url_or_req, *args, **kwargs)
-    body = real_resp.read()
+    # Chunked Transfer Encoding Buffer Bloat Defense: cap body capture at 64KB sliding window
+    body = real_resp.read(65536)
     headers = dict(real_resp.headers)
     ctx.recorded_calls[sig] = WireCallRecord(method, url, real_resp.status, body, headers)
 
@@ -161,6 +165,12 @@ class CEGISAstMutator(ast.NodeTransformer):
 
 class CEGISPythonEngine:
     """Counterexample-Guided Inductive Synthesis for Python source code."""
+    _repair_attempts: Dict[str, int] = {}
+    MAX_CASCADE_DEPTH = 3
+
+    @classmethod
+    def reset_circuit_breaker(cls):
+        cls._repair_attempts.clear()
 
     @staticmethod
     def repair_source(
@@ -170,6 +180,16 @@ class CEGISPythonEngine:
         invariants: List[str],
         file_path: str = "agent.py"
     ) -> Dict[str, Any]:
+        # Infinite Cascade Loop Defense: Circuit Breaker
+        target_key = f"{file_path}:{failing_field}"
+        attempts = CEGISPythonEngine._repair_attempts.get(target_key, 0)
+        if attempts >= CEGISPythonEngine.MAX_CASCADE_DEPTH:
+            return {
+                "repair_found": False,
+                "error": f"Cascade Loop Circuit Breaker TRIPPED: Max automated heal attempts ({CEGISPythonEngine.MAX_CASCADE_DEPTH}) exceeded for {target_key}."
+            }
+        CEGISPythonEngine._repair_attempts[target_key] = attempts + 1
+
         discovered_paths = PathDiscoveryVisitor.find_paths_in_dict(crash_payload, failing_field)
         if not discovered_paths:
             # Check for cents suffix pattern
@@ -260,26 +280,32 @@ def _parse_strict_number(val: Any) -> Optional[float]:
         return None
 
 def evaluate_invariant(expr: str, data: Any) -> bool:
-    """Evaluate business and financial constraints with JSON type poisoning defense."""
-    expr = expr.strip()
-    if expr == "debits == credits":
-        if isinstance(data, dict):
-            d = _parse_strict_number(data.get("debits"))
-            c = _parse_strict_number(data.get("credits"))
-            if d is None or c is None:
-                return False  # Reject type poisoned values (null/empty/unparseable strings)
-            return abs(d - c) < 0.001
+    """Evaluate business and financial constraints with JSON type poisoning, precision drift, and safe navigation defense."""
+    try:
+        expr = expr.strip()
+        if expr == "debits == credits":
+            if isinstance(data, dict):
+                d = _parse_strict_number(data.get("debits"))
+                c = _parse_strict_number(data.get("credits"))
+                if d is None or c is None:
+                    return False  # Reject type poisoned values (null/empty/unparseable strings)
+                # Precision Drift Defense: Integer cents comparison + epsilon
+                return round(d * 100) == round(c * 100) or abs(d - c) < 0.0001
+            return False
+        if "confidence >=" in expr:
+            if isinstance(data, dict):
+                thresh = float(expr.split(">=")[1].strip())
+                conf = _parse_strict_number(data.get("confidence"))
+                return conf is not None and conf >= thresh
+            return False
+        if "settlement_confirmed" in expr:
+            if isinstance(data, dict):
+                return data.get("settlement_confirmed") is True
+            return False
+        return data is not None
+    except Exception:
+        # Safe Navigation: never crash reliability engine on unhandled access
         return False
-    if "confidence >=" in expr:
-        if isinstance(data, dict):
-            thresh = float(expr.split(">=")[1].strip())
-            return float(data.get("confidence", 0)) >= thresh
-        return False
-    if "settlement_confirmed" in expr:
-        if isinstance(data, dict):
-            return data.get("settlement_confirmed") is True
-        return False
-    return data is not None
 
 def classify_error(err: Exception) -> str:
     msg = str(err).lower()

@@ -11,6 +11,8 @@ import {
   extractMemberAccessExpressions,
   extractSourceLocation,
   parseAST,
+  withAdvisoryFileLock,
+  generateSafeVariableName,
 } from "../../src/recovery/cegis-engine.ts";
 import { PrattParser, CodeGenerator } from "../../src/recovery/ast-parser.ts";
 import { InvariantEvaluator } from "../../src/recovery/invariant-eval.ts";
@@ -359,6 +361,109 @@ async function runCEGISTestSuite() {
 
     console.log(`  ${c.green}PASSED${c.reset} — Strict numerical evaluation rejected null, NaN, empty strings, and missing keys.`);
     console.log(`  ${c.yellow}         Financial ledger balance cannot be tricked by JSON type poisoning.${c.reset}`);
+    passed++;
+  } catch (err: any) {
+    console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
+    failed++;
+  }
+
+  // ── TEST 10: Infinite Cascade Loop Circuit Breaker ────────────────────────
+  try {
+    console.log(`\n${c.cyan}[TEST 10]${c.reset} Infinite Cascade Loop Circuit Breaker (Max 3 Automated Heals)`);
+
+    const cascadeTarget = "cascade_payment.ts";
+    CEGISEngine.resetCircuitBreaker(); // Clean state
+
+    // Simulate 3 successive repair attempts on same file/location
+    const res1 = CEGISEngine.repair("data.amount", 10, { data: { amount: 100 } }, ["result == 100"], "const a = 1;", cascadeTarget);
+    const res2 = CEGISEngine.repair("data.amount", 10, { data: { amount: 100 } }, ["result == 100"], "const a = 1;", cascadeTarget);
+    const res3 = CEGISEngine.repair("data.amount", 10, { data: { amount: 100 } }, ["result == 100"], "const a = 1;", cascadeTarget);
+
+    // 4th attempt must be rejected by circuit breaker immediately
+    const res4 = CEGISEngine.repair("data.amount", 10, { data: { amount: 100 } }, ["result == 100"], "const a = 1;", cascadeTarget);
+
+    if (res4.repairFound) {
+      throw new Error("Cascade Loop Circuit Breaker failed to trip on 4th attempt!");
+    }
+    const breakerCounterexample = res4.counterexamplesFound.find(ce => ce.reason.includes("Circuit Breaker TRIPPED"));
+    if (!breakerCounterexample) {
+      throw new Error("Missing circuit breaker counterexample in audit trail!");
+    }
+
+    console.log(`  ${c.green}PASSED${c.reset} — Circuit breaker tripped at depth 3:`);
+    console.log(`  ${c.yellow}         ${breakerCounterexample.reason}${c.reset}`);
+    passed++;
+  } catch (err: any) {
+    console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
+    failed++;
+  }
+
+  // ── TEST 11: Scope Creep Collision-Free Naming & Advisory File Lock ───────
+  try {
+    console.log(`\n${c.cyan}[TEST 11]${c.reset} Scope Creep Variable Shadowing Defense & Advisory File Lock`);
+
+    // 1. Collision-free unique variable naming
+    const varName1 = generateSafeVariableName("amount");
+    const varName2 = generateSafeVariableName("amount");
+    if (!varName1.startsWith("_omega_healed_amount_")) {
+      throw new Error(`Unexpected generated var name format: ${varName1}`);
+    }
+    console.log(`  ${c.green}✔${c.reset} Generated collision-free variable name: ${varName1}`);
+
+    // 2. Advisory file lock concurrency defense
+    const testFilePath = path.resolve("./test_advisory_target.ts");
+    fs.writeFileSync(testFilePath, "// test code\n");
+
+    let lockAcquiredInside = false;
+    await withAdvisoryFileLock(testFilePath, async () => {
+      lockAcquiredInside = true;
+      // While lock is held, verify .omega.lock file exists on disk
+      if (!fs.existsSync(`${testFilePath}.omega.lock`)) {
+        throw new Error("Advisory lock file missing while lock is held!");
+      }
+    });
+
+    // After release, verify lock file is removed
+    if (fs.existsSync(`${testFilePath}.omega.lock`)) {
+      throw new Error("Advisory lock file was not cleaned up after release!");
+    }
+    fs.unlinkSync(testFilePath);
+
+    console.log(`  ${c.green}PASSED${c.reset} — Scope Creep prevented via hashed identifiers; Advisory File Lock verified on disk.`);
+    passed++;
+  } catch (err: any) {
+    console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
+    failed++;
+  }
+
+  // ── TEST 12: Floating-Point Precision Drift & Safe Null Navigation ─────────
+  try {
+    console.log(`\n${c.cyan}[TEST 12]${c.reset} Floating-Point Precision Drift (0.1 + 0.2 === 0.3) & Safe Null Navigation`);
+
+    // 1. In standard JS: 0.1 + 0.2 === 0.30000000000000004 !== 0.3
+    const precisionDriftPayload = {
+      debits: 0.1 + 0.2, // 0.30000000000000004
+      credits: 0.3,
+    };
+
+    const resDrift = InvariantEvaluator.evaluateExpression("debits == credits", precisionDriftPayload);
+    if (!resDrift.passed) {
+      throw new Error("Floating-Point Precision Drift bug: 0.1 + 0.2 was falsely rejected as unequal to 0.3!");
+    }
+    console.log(`  ${c.green}✔${c.reset} Exact integer cent conversion balanced 0.1 + 0.2 ($${precisionDriftPayload.debits}) with $${precisionDriftPayload.credits}`);
+
+    // 2. Safe navigation on missing nested properties: data.totals.grandTotal > 0
+    const emptyObjectPayload = {};
+    const resSafeNav = InvariantEvaluator.evaluateExpression("data.totals.grandTotal > 0", emptyObjectPayload);
+    if (resSafeNav.passed) {
+      throw new Error("Expected missing property to evaluate to false");
+    }
+    if (!resSafeNav.message?.includes("Safe Navigation")) {
+      throw new Error(`Expected Safe Navigation message, got: ${resSafeNav.message}`);
+    }
+    console.log(`  ${c.green}✔${c.reset} Safe navigation caught missing nested path: ${resSafeNav.message}`);
+
+    console.log(`  ${c.green}PASSED${c.reset} — Floating-Point Precision Drift and Safe Null Navigation strictly verified.`);
     passed++;
   } catch (err: any) {
     console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);

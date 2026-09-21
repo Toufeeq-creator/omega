@@ -7,10 +7,22 @@ import { CheckpointStore, JournalEntry, JournalEventType, JournalStore, RunStore
 export class SqliteOmegaStore implements WorkflowStore, RunStore, JournalStore, CheckpointStore {
   private db: DatabaseSync;
   private stmtCache = new Map<string, any>();
+  // In-Memory Asynchronous Serialization Queue:
+  // SQLite WAL allows concurrent readers, but strictly 1 writer at a time.
+  // This queue serializes all writes in-memory, completely preventing SQLITE_BUSY deadlocks.
+  private writeQueue: Promise<unknown> = Promise.resolve();
 
   constructor(location = ":memory:") {
     this.db = new DatabaseSync(location);
     this.initTables();
+  }
+
+  private enqueueWrite<T>(op: () => T | Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      this.writeQueue = this.writeQueue
+        .then(() => Promise.resolve(op()).then(resolve, reject))
+        .catch(() => {});
+    });
   }
 
   private initTables(): void {
@@ -79,11 +91,13 @@ export class SqliteOmegaStore implements WorkflowStore, RunStore, JournalStore, 
 
   // --- WorkflowStore ---
   async saveWorkflow(ir: OmegaIR): Promise<void> {
-    const stmt = this.getStmt(`
-      INSERT OR REPLACE INTO workflows (id, name, version, ir_json, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    stmt.run(ir.id, ir.name, ir.version, JSON.stringify(ir), new Date().toISOString());
+    return this.enqueueWrite(() => {
+      const stmt = this.getStmt(`
+        INSERT OR REPLACE INTO workflows (id, name, version, ir_json, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      stmt.run(ir.id, ir.name, ir.version, JSON.stringify(ir), new Date().toISOString());
+    });
   }
 
   async getWorkflow(id: WorkflowId): Promise<OmegaIR | null> {
@@ -100,18 +114,22 @@ export class SqliteOmegaStore implements WorkflowStore, RunStore, JournalStore, 
 
   // --- RunStore ---
   async createRun(state: ExecutionState): Promise<void> {
-    const stmt = this.getStmt(`
-      INSERT INTO runs (id, workflow_id, state_json, started_at, updated_at)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    stmt.run(state.runId, state.workflowId, JSON.stringify(state), state.startedAt, state.updatedAt);
+    return this.enqueueWrite(() => {
+      const stmt = this.getStmt(`
+        INSERT INTO runs (id, workflow_id, state_json, started_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      stmt.run(state.runId, state.workflowId, JSON.stringify(state), state.startedAt, state.updatedAt);
+    });
   }
 
   async updateRun(state: ExecutionState): Promise<void> {
-    const stmt = this.getStmt(`
-      UPDATE runs SET state_json = ?, updated_at = ? WHERE id = ?
-    `);
-    stmt.run(JSON.stringify(state), state.updatedAt, state.runId);
+    return this.enqueueWrite(() => {
+      const stmt = this.getStmt(`
+        UPDATE runs SET state_json = ?, updated_at = ? WHERE id = ?
+      `);
+      stmt.run(JSON.stringify(state), state.updatedAt, state.runId);
+    });
   }
 
   async getRun(id: RunId): Promise<ExecutionState | null> {
@@ -133,18 +151,20 @@ export class SqliteOmegaStore implements WorkflowStore, RunStore, JournalStore, 
 
   // --- JournalStore ---
   async append(entry: Omit<JournalEntry, "sequence">): Promise<SequenceNum> {
-    const stmt = this.getStmt(`
-      INSERT INTO journal (run_id, node_id, timestamp, event_type, payload_json)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    const res = stmt.run(
-      entry.runId,
-      entry.nodeId || null,
-      entry.timestamp,
-      entry.eventType,
-      JSON.stringify(entry.payload ?? null)
-    );
-    return Number(res.lastInsertRowid);
+    return this.enqueueWrite(() => {
+      const stmt = this.getStmt(`
+        INSERT INTO journal (run_id, node_id, timestamp, event_type, payload_json)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      const res = stmt.run(
+        entry.runId,
+        entry.nodeId || null,
+        entry.timestamp,
+        entry.eventType,
+        JSON.stringify(entry.payload ?? null)
+      );
+      return Number(res.lastInsertRowid);
+    });
   }
 
   async readAll(runId: RunId): Promise<JournalEntry[]> {
@@ -175,11 +195,13 @@ export class SqliteOmegaStore implements WorkflowStore, RunStore, JournalStore, 
 
   // --- CheckpointStore ---
   async saveCheckpoint(checkpointId: CheckpointId, state: ExecutionState): Promise<void> {
-    const stmt = this.getStmt(`
-      INSERT OR REPLACE INTO checkpoints (id, run_id, state_json, created_at)
-      VALUES (?, ?, ?, ?)
-    `);
-    stmt.run(checkpointId, state.runId, JSON.stringify(state), new Date().toISOString());
+    return this.enqueueWrite(() => {
+      const stmt = this.getStmt(`
+        INSERT OR REPLACE INTO checkpoints (id, run_id, state_json, created_at)
+        VALUES (?, ?, ?, ?)
+      `);
+      stmt.run(checkpointId, state.runId, JSON.stringify(state), new Date().toISOString());
+    });
   }
 
   async getCheckpoint(checkpointId: CheckpointId): Promise<ExecutionState | null> {

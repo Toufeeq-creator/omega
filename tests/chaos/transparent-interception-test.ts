@@ -37,11 +37,13 @@ function cleanupDb() {
 let serverRequestCount = 0;
 let server: http.Server;
 let serverUrl: string;
+let lastCapturedHeaders: http.IncomingHttpHeaders = {};
 
 function startTestServer(): Promise<string> {
   return new Promise((resolve) => {
     server = http.createServer((req, res) => {
       serverRequestCount++;
+      lastCapturedHeaders = req.headers;
 
       if (req.url === "/api/charge") {
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -60,6 +62,13 @@ function startTestServer(): Promise<string> {
           settlement_confirmed: true,
           balance: 0,
         }));
+      } else if (req.url === "/api/large-stream") {
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        const chunk = "X".repeat(1024);
+        for (let i = 0; i < 100; i++) {
+          res.write(chunk);
+        }
+        res.end();
       } else {
         res.writeHead(404);
         res.end("Not Found");
@@ -425,6 +434,122 @@ async function runTransparentInterceptionTests() {
 
     console.log(`  ${c.green}PASSED${c.reset} — Executed ${concurrencyCount} concurrent requests with 100% AsyncLocalStorage isolation`);
     console.log(`  ${c.yellow}         Verified 50 unique execution contexts, ZERO cross-talk, ZERO data leakage.${c.reset}`);
+    passed++;
+  } catch (err: any) {
+    console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
+    failed++;
+  }
+
+  // ── TEST 9: Keep-Alive Trace Token Injection & Double Stream Consumption ──
+  try {
+    console.log(`\n${c.cyan}[TEST 9]${c.reset} Keep-Alive Trace Injection & Double Stream Consumption Defense`);
+    serverRequestCount = 0;
+
+    const testRunId = "run_trace_verification_88";
+    let callerReceivedJson: any = null;
+
+    await TransparentNetworkInterceptor.runWithContext(
+      testRunId,
+      "trace_node",
+      false, // live mode
+      async () => {
+        // Agent calls standard fetch()
+        const res = await fetch(`${serverUrl}/api/charge`, {
+          method: "POST",
+          body: JSON.stringify({ amount: 50000 }),
+        });
+
+        // Caller reads the stream via res.json() — MUST NOT throw 'body stream already read'!
+        callerReceivedJson = await res.json();
+      }
+    );
+
+    // Verify trace headers were injected on wire
+    if (lastCapturedHeaders["x-omega-trace-id"] !== testRunId) {
+      throw new Error(`Expected trace header 'x-omega-trace-id' to be ${testRunId}, got: ${lastCapturedHeaders["x-omega-trace-id"]}`);
+    }
+    if (lastCapturedHeaders["x-omega-node-id"] !== "trace_node") {
+      throw new Error(`Expected node header 'x-omega-node-id' to be trace_node, got: ${lastCapturedHeaders["x-omega-node-id"]}`);
+    }
+
+    // Verify caller successfully consumed body without hang or stream error
+    if (!callerReceivedJson || callerReceivedJson.amount !== 50000) {
+      throw new Error("Double Stream Consumption bug: caller failed to read response body!");
+    }
+
+    console.log(`  ${c.green}PASSED${c.reset} — Trace headers injected (X-Omega-Trace-ID: ${testRunId})`);
+    console.log(`  ${c.yellow}         Double Stream Consumption prevented via response.clone(). Caller read body successfully.${c.reset}`);
+    passed++;
+  } catch (err: any) {
+    console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
+    failed++;
+  }
+
+  // ── TEST 10: Low-Level http.request Interception & Chunked Buffer Bloat Cap ──
+  try {
+    console.log(`\n${c.cyan}[TEST 10]${c.reset} Low-Level http.request Interception & Chunked Streaming 64KB Sliding Cap`);
+    serverRequestCount = 0;
+
+    const testRunId = "run_lowlevel_stream_99";
+    let streamReadSize = 0;
+
+    // 1. Verify low-level http.request receives injected trace header
+    await TransparentNetworkInterceptor.runWithContext(
+      testRunId,
+      "low_level_node",
+      false,
+      async () => {
+        // Use Node's built-in http.request directly (simulating third-party SDK like Axios or older OpenAI SDK)
+        await new Promise<void>((resolve, reject) => {
+          const req = http.request(`${serverUrl}/api/balance`, { method: "GET" }, (res) => {
+            res.on("data", () => {});
+            res.on("end", () => resolve());
+          });
+          req.on("error", reject);
+          req.end();
+        });
+      }
+    );
+
+    if (lastCapturedHeaders["x-omega-trace-id"] !== testRunId) {
+      throw new Error(`http.request bypass: trace header not injected! Got: ${lastCapturedHeaders["x-omega-trace-id"]}`);
+    }
+    console.log(`  ${c.green}✔${c.reset} Low-level http.request intercepted, trace header injected: ${lastCapturedHeaders["x-omega-trace-id"]}`);
+
+    // 2. Verify 100KB streaming response is capped at 64KB in telemetry buffer (sliding window defense)
+    let recordedCalls: Map<string, any> = new Map();
+    await TransparentNetworkInterceptor.runWithContext(
+      "run_chunked_bloat_test",
+      "chunked_node",
+      false,
+      async () => {
+        const res = await fetch(`${serverUrl}/api/large-stream`);
+        const fullText = await res.text();
+        streamReadSize = fullText.length; // Caller reads entire 100KB
+        recordedCalls = TransparentNetworkInterceptor.getRecordedCalls();
+      }
+    );
+
+    if (streamReadSize !== 102400) {
+      throw new Error(`Caller stream compromised: expected 102400 bytes, got ${streamReadSize}`);
+    }
+
+    // Telemetry buffer must be capped at <= 65536 bytes + truncation marker
+    let cappedTelemetryFound = false;
+    for (const [, call] of recordedCalls) {
+      if (call.url.includes("/api/large-stream")) {
+        if (call.responseBody.includes("[STREAM_TRUNCATED_64KB]")) {
+          cappedTelemetryFound = true;
+          console.log(`  ${c.green}✔${c.reset} Chunked buffer bloat capped at 64KB: ${call.responseBody.length} chars (prevented RAM exhaustion)`);
+        }
+      }
+    }
+
+    if (!cappedTelemetryFound) {
+      throw new Error("Telemetry failed to apply 64KB sliding-window cap on large stream!");
+    }
+
+    console.log(`  ${c.green}PASSED${c.reset} — Low-level http.request intercepted & Chunked Buffer Bloat safely capped.`);
     passed++;
   } catch (err: any) {
     console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);

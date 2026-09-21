@@ -14,36 +14,42 @@ import { SqliteOmegaStore } from "./sqlite.ts";
 
 /**
  * Logical Vector Clock for multi-node causal ordering.
+ * Uses BigInt internally to defend against 32-bit integer overflow and sequence exhaustion.
  */
 export class VectorClock {
-  private clock: Map<string, number> = new Map();
+  private clock: Map<string, bigint> = new Map();
 
   constructor(public readonly nodeId: string) {
-    this.clock.set(nodeId, 0);
+    this.clock.set(nodeId, 0n);
   }
 
   /**
    * Increment local node's clock tick.
    */
   tick(): void {
-    const current = this.clock.get(this.nodeId) || 0;
-    this.clock.set(this.nodeId, current + 1);
+    const current = this.clock.get(this.nodeId) || 0n;
+    this.clock.set(this.nodeId, current + 1n);
   }
 
   /**
    * Merge incoming vector clock from remote node.
    */
-  merge(remote: Record<string, number>): void {
+  merge(remote: Record<string, number | string>): void {
     for (const [node, counter] of Object.entries(remote)) {
-      const local = this.clock.get(node) || 0;
-      this.clock.set(node, Math.max(local, counter));
+      const local = this.clock.get(node) || 0n;
+      const remoteVal = typeof counter === "string" ? BigInt(counter) : BigInt(Math.max(0, Math.floor(counter)));
+      this.clock.set(node, local > remoteVal ? local : remoteVal);
     }
+  }
+
+  get(nodeId: string): bigint {
+    return this.clock.get(nodeId) || 0n;
   }
 
   toJSON(): Record<string, number> {
     const obj: Record<string, number> = {};
     for (const [k, v] of this.clock.entries()) {
-      obj[k] = v;
+      obj[k] = Number(v);
     }
     return obj;
   }

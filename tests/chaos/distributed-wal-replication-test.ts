@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { SqliteOmegaStore } from "../../src/store/sqlite.ts";
-import { ReplicationNode } from "../../src/store/replication.ts";
+import { ReplicationNode, VectorClock } from "../../src/store/replication.ts";
 import { ReplayEngine } from "../../src/runtime/replay.ts";
 
 const DB_DIR = path.resolve("./replication_test_dbs");
@@ -147,6 +147,48 @@ async function runDistributedReplicationTests() {
     console.log(`  ${c.green}PASSED${c.reset} — New leader replayed full 25-event journal from SQLite with ZERO data drift.`);
     passed++;
 
+    // ── TEST 6: Vector Clock BigInt 64-Bit Boundary & Overflow Defense ───────
+    console.log(`\n${c.cyan}[TEST 6]${c.reset} Vector Clock BigInt Overflow Defense (> 4,294,967,295 Ticks)`);
+    const overflowClock = new VectorClock("node-high-throughput");
+
+    // Seed with value beyond 32-bit unsigned max (4,294,967,295)
+    overflowClock.merge({ "node-high-throughput": "5000000000" });
+    overflowClock.tick();
+
+    const currentBigVal = overflowClock.get("node-high-throughput");
+    if (currentBigVal !== 5000000001n) {
+      throw new Error(`Vector clock failed BigInt precision test! Expected 5000000001n, got: ${currentBigVal}`);
+    }
+
+    console.log(`  ${c.green}PASSED${c.reset} — VectorClock seamlessly incremented beyond 32-bit boundary: ${currentBigVal.toString()}n`);
+    passed++;
+
+    // ── TEST 7: SQLITE_BUSY Write Lock Deadlock Defense (50 Concurrent Writers) ─
+    console.log(`\n${c.cyan}[TEST 7]${c.reset} SQLITE_BUSY Write Lock Deadlock Defense (50 Concurrent Writers)`);
+    const concurrentWrites = 50;
+    const writePromises = Array.from({ length: concurrentWrites }, (_, i) => {
+      return leaderStore.append({
+        runId: "run_acid_stress",
+        nodeId: `writer_task_${i + 1}`,
+        timestamp: new Date().toISOString(),
+        eventType: "NodeCompleted",
+        payload: { batchId: i + 1, status: "queued" },
+      });
+    });
+
+    const writeResults = await Promise.all(writePromises);
+    if (writeResults.length !== concurrentWrites) {
+      throw new Error(`Expected ${concurrentWrites} writes to succeed, got ${writeResults.length}`);
+    }
+
+    // Verify all sequence numbers are strictly ascending and unique
+    const seqSet = new Set(writeResults);
+    if (seqSet.size !== concurrentWrites) {
+      throw new Error("Duplicate sequence numbers generated in concurrent writes!");
+    }
+
+    console.log(`  ${c.green}PASSED${c.reset} — In-memory write queue serialized ${concurrentWrites} concurrent writes with ZERO SQLITE_BUSY errors.`);
+    passed++;
   } catch (err: any) {
     console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
     failed++;
