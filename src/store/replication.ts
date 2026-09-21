@@ -121,6 +121,7 @@ export class ReplicationNode {
   public readonly vectorClock: VectorClock;
   private term = 1;
   private isLeader = false;
+  private lastCommittedSeq = 0;
 
   private server: net.Server | null = null;
   private serverPort = 0;
@@ -195,6 +196,7 @@ export class ReplicationNode {
   async appendAndReplicate(entry: Omit<JournalEntry, "sequence">): Promise<JournalEntry> {
     this.vectorClock.tick();
     const sequence = await this.store.append(entry);
+    this.lastCommittedSeq = sequence;
 
     const fullEntry: JournalEntry = {
       sequence,
@@ -242,13 +244,33 @@ export class ReplicationNode {
   }
 
   private async handleFollowerPacket(packet: ReplicationPacket): Promise<void> {
-    if (packet.term >= this.term) {
-      this.term = packet.term;
-      this.lastLeaderHeartbeat = Date.now();
-      this.vectorClock.merge(packet.clock);
+    // 1. Term & Epoch validation: Reject stale/partitioned leader packets
+    if (packet.term < this.term) {
+      return; // Ignore frames from an older term / partitioned leader
     }
 
+    if (packet.term > this.term) {
+      this.term = packet.term;
+    }
+    this.lastLeaderHeartbeat = Date.now();
+    this.vectorClock.merge(packet.clock);
+
     if (packet.type === "WAL_ENTRY") {
+      // 2. Monotonic Watermark Guard: Defend against Node Time Desync & Out-of-Order Replay
+      // Physical clock drift has ZERO effect on WAL ordering. Reject any stale or duplicate sequence.
+      if (packet.entry.sequence <= this.lastCommittedSeq) {
+        // Send ACK anyway so leader knows follower has already processed this sequence
+        if (this.leaderClient) {
+          this.leaderClient.send({
+            type: "ACK",
+            term: this.term,
+            senderId: this.nodeId,
+            seq: packet.entry.sequence,
+          });
+        }
+        return;
+      }
+
       // Ingest journal entry into local follower store
       await this.store.append({
         runId: packet.entry.runId,
@@ -257,6 +279,8 @@ export class ReplicationNode {
         eventType: packet.entry.eventType,
         payload: packet.entry.payload,
       });
+
+      this.lastCommittedSeq = packet.entry.sequence;
 
       // Send ACK back to leader
       if (this.leaderClient) {
@@ -268,6 +292,14 @@ export class ReplicationNode {
         });
       }
     }
+  }
+
+  getLastCommittedSeq(): number {
+    return this.lastCommittedSeq;
+  }
+
+  getTerm(): number {
+    return this.term;
   }
 
   /**

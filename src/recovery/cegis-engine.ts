@@ -6,6 +6,7 @@ import {
   findMemberExpressionsInAST,
   ASTNode,
   MemberExpressionNode,
+  parseAST,
 } from "./ast-parser.ts";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -736,17 +737,47 @@ export class CEGISEngine {
         if (result.passed) {
           // WINNER FOUND! Generate diff and attestation
           const sourceLines = sourceFileContent ? sourceFileContent.split("\n") : [];
-          const diff = sourceFileContent && sourceFilePath
-            ? generateUnifiedDiff(sourceFilePath, sourceLines, candidate)
-            : `# Proposed repair\n- ${candidate.originalExpression}\n+ ${candidate.patchedExpression}`;
-
           const patchedSource = sourceFileContent
-            ? sourceFileContent.split("\n").map((line, idx) =>
+            ? sourceLines.map((line, idx) =>
                 idx === lineNumber - 1
                   ? line.replace(candidate.originalExpression, candidate.patchedExpression)
                   : line
               ).join("\n")
             : candidate.patchedExpression;
+
+          // ── Syntax Gatekeeper: Defend against the "Broken Build" Syntax Trap ──
+          // Verify that the candidate and full patched file compile cleanly with 0 syntax errors
+          let syntaxValid = true;
+          try {
+            // 1. AST Validation: ensure candidate expression parses into well-formed AST
+            parseAST(candidate.patchedExpression);
+
+            // 2. Expression Syntax Gate: V8 bytecode compilation
+            new Function("return (" + candidate.patchedExpression + ")");
+
+            // 3. Full Source Syntax Gate: strip imports/exports to validate function & statement syntax
+            if (sourceFileContent) {
+              const strippedSource = patchedSource
+                .replace(/^\s*import\s+[^;]+;?/gm, "")
+                .replace(/^\s*export\s+(default\s+)?/gm, "");
+              new Function(strippedSource);
+            }
+          } catch (syntaxErr: any) {
+            syntaxValid = false;
+            allCounterexamples.push({
+              payload: crashPayload,
+              reason: `Syntax Gatekeeper rejected candidate '${candidate.patchedExpression}': ${syntaxErr.message}`,
+            });
+          }
+
+          if (!syntaxValid) {
+            // Discard candidate: NEVER emit a patch that fails syntax compilation!
+            continue;
+          }
+
+          const diff = sourceFileContent && sourceFilePath
+            ? generateUnifiedDiff(sourceFilePath, sourceLines, candidate)
+            : `# Proposed repair\n- ${candidate.originalExpression}\n+ ${candidate.patchedExpression}`;
 
           const attestation = generateAttestation(
             sourceFileContent || candidate.originalExpression,

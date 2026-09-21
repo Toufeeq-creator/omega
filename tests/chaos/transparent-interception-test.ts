@@ -354,6 +354,83 @@ async function runTransparentInterceptionTests() {
     failed++;
   }
 
+  // ── TEST 8: High-Concurrency Asynchronous Context Isolation (50 Concurrent Requests) ──
+  try {
+    console.log(`\n${c.cyan}[TEST 8]${c.reset} Concurrency Isolation — 50 parallel requests, ZERO cross-request context bleeding`);
+    serverRequestCount = 0;
+
+    const concurrencyCount = 50;
+    const tasks = Array.from({ length: concurrencyCount }, (_, i) => {
+      const runId = `concurrent_run_${i + 1}`;
+      const uniqueAmount = 1000 + i;
+
+      return TransparentNetworkInterceptor.runWithContext(
+        runId,
+        `node_${i + 1}`,
+        false, // Live recording mode
+        async () => {
+          // Introduce random micro-jitter to force async interleaving across Node's event loop
+          await new Promise((r) => setTimeout(r, Math.floor(Math.random() * 20)));
+
+          // Make outgoing fetch call with unique payload
+          const res = await fetch(`${serverUrl}/api/charge`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ amount: uniqueAmount, runId }),
+          });
+          const data = (await res.json()) as any;
+
+          // Introduce another jitter before reading back context
+          await new Promise((r) => setTimeout(r, Math.floor(Math.random() * 20)));
+
+          // Verify that the current context inside AsyncLocalStorage belongs strictly to THIS task
+          const currentCtx = TransparentNetworkInterceptor.getContext();
+          if (!currentCtx) {
+            throw new Error(`Context lost in task ${i + 1}`);
+          }
+          if (currentCtx.runId !== runId) {
+            throw new Error(
+              `CROSS-REQUEST DATA LEAK! Task ${i + 1} with runId ${runId} saw context for ${currentCtx.runId}!`
+            );
+          }
+
+          const recorded = TransparentNetworkInterceptor.getRecordedCalls();
+          if (!recorded || recorded.size === 0) {
+            throw new Error(`Task ${i + 1} missing recorded call`);
+          }
+
+          return {
+            taskId: i + 1,
+            runId: currentCtx.runId,
+            recordedCount: recorded.size,
+          };
+        }
+      );
+    });
+
+    const results = await Promise.all(tasks);
+
+    if (results.length !== concurrencyCount) {
+      throw new Error(`Expected ${concurrencyCount} results, got ${results.length}`);
+    }
+
+    // Verify all 50 tasks maintained complete context isolation
+    const seenRunIds = new Set<string>();
+    for (const res of results) {
+      if (seenRunIds.has(res.runId)) {
+        throw new Error(`Duplicate runId found in context isolation check: ${res.runId}`);
+      }
+      seenRunIds.add(res.runId);
+    }
+
+    console.log(`  ${c.green}PASSED${c.reset} — Executed ${concurrencyCount} concurrent requests with 100% AsyncLocalStorage isolation`);
+    console.log(`  ${c.yellow}         Verified 50 unique execution contexts, ZERO cross-talk, ZERO data leakage.${c.reset}`);
+    passed++;
+  } catch (err: any) {
+    console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
+    failed++;
+  }
+
   // ── Cleanup & Report ──
   store.close();
   await stopTestServer();

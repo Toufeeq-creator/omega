@@ -374,7 +374,11 @@ export class PrattParser {
   }
 
   parse(): ASTNode {
-    return this.parseStatement();
+    const node = this.parseStatement();
+    if (this.peek().type !== TokenType.EOF) {
+      throw new Error(`SyntaxError: Unexpected token '${this.peek().value}' at position ${this.peek().start}`);
+    }
+    return node;
   }
 
   private peek(): Token {
@@ -478,7 +482,9 @@ export class PrattParser {
     // Grouping: (expr)
     if (token.type === TokenType.LeftParen) {
       const expr = this.parseExpression(Precedence.Lowest);
-      this.match(TokenType.RightParen);
+      if (!this.match(TokenType.RightParen)) {
+        throw new Error("SyntaxError: Missing closing ')'");
+      }
       return expr;
     }
 
@@ -551,7 +557,9 @@ export class PrattParser {
     if (token.type === TokenType.QuestionDot) {
       if (this.match(TokenType.LeftBracket)) {
         const property = this.parseExpression(Precedence.Lowest);
-        this.match(TokenType.RightBracket);
+        if (!this.match(TokenType.RightBracket)) {
+          throw new Error("SyntaxError: Missing closing ']'");
+        }
         return {
           type: "MemberExpression",
           object: left,
@@ -573,7 +581,9 @@ export class PrattParser {
     // Member access via bracket notation: obj[prop]
     if (token.type === TokenType.LeftBracket) {
       const property = this.parseExpression(Precedence.Lowest);
-      this.match(TokenType.RightBracket);
+      if (!this.match(TokenType.RightBracket)) {
+        throw new Error("SyntaxError: Missing closing ']'");
+      }
       return {
         type: "MemberExpression",
         object: left,
@@ -591,7 +601,9 @@ export class PrattParser {
           args.push(this.parseExpression(Precedence.Lowest));
         } while (this.match(TokenType.Comma));
       }
-      this.match(TokenType.RightParen);
+      if (!this.match(TokenType.RightParen)) {
+        throw new Error("SyntaxError: Missing closing ')' after call arguments");
+      }
       return {
         type: "CallExpression",
         callee: left,
@@ -810,4 +822,12 @@ export function findMemberExpressionsInAST(root: ASTNode): MemberExpressionNode[
 
   traverse(root);
   return results;
+}
+
+/**
+ * Parse a source expression or statement into an ASTNode.
+ * Throws SyntaxError if unclosed brackets, missing parens, or invalid tokens exist.
+ */
+export function parseAST(source: string): ASTNode {
+  return new PrattParser(source).parse();
 }

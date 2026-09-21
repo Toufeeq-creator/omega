@@ -59,6 +59,32 @@ export class InvariantEvaluator {
     };
   }
 
+  /**
+   * Directly evaluate an invariant expression against a data payload.
+   * Defends against JSON Type Poisoning.
+   */
+  static evaluateExpression(
+    expression: string,
+    data: any
+  ): { passed: boolean; actualValue?: unknown; message?: string } {
+    return this.checkExpression(expression, data);
+  }
+
+  /**
+   * Strictly parse and validate numeric financial values.
+   * Defends against JSON Type Poisoning (null, undefined, non-numeric strings, NaN, Infinity).
+   */
+  private static parseStrictNumber(val: unknown): number | null {
+    if (typeof val === "number") {
+      return !isNaN(val) && isFinite(val) ? val : null;
+    }
+    if (typeof val === "string" && val.trim() !== "") {
+      const parsed = Number(val.trim());
+      return !isNaN(parsed) && isFinite(parsed) ? parsed : null;
+    }
+    return null;
+  }
+
   private static checkExpression(
     expression: string,
     data: any
@@ -67,8 +93,18 @@ export class InvariantEvaluator {
 
     // 1. Financial invariant: debits == credits
     if (expr === "debits == credits") {
-      const debits = typeof data?.debits === "number" ? data.debits : 0;
-      const credits = typeof data?.credits === "number" ? data.credits : 0;
+      const debits = InvariantEvaluator.parseStrictNumber(data?.debits);
+      const credits = InvariantEvaluator.parseStrictNumber(data?.credits);
+
+      // JSON Type Poisoning Defense: reject if values are null, undefined, or unparseable
+      if (debits === null || credits === null) {
+        return {
+          passed: false,
+          actualValue: { debits: data?.debits, credits: data?.credits },
+          message: `JSON Type Poisoning detected: debits or credits is not a valid finite number (debits: ${JSON.stringify(data?.debits)}, credits: ${JSON.stringify(data?.credits)})`,
+        };
+      }
+
       const passed = Math.abs(debits - credits) < 0.001;
       return {
         passed,
@@ -79,7 +115,14 @@ export class InvariantEvaluator {
 
     // 2. Confidence threshold: confidence >= 0.8
     if (expr.includes("confidence >=")) {
-      const conf = typeof data?.confidence === "number" ? data.confidence : 0;
+      const conf = InvariantEvaluator.parseStrictNumber(data?.confidence);
+      if (conf === null) {
+        return {
+          passed: false,
+          actualValue: { confidence: data?.confidence },
+          message: `Type error: confidence value is not a valid number (received: ${JSON.stringify(data?.confidence)})`,
+        };
+      }
       const passed = conf >= 0.8;
       return {
         passed,
@@ -90,10 +133,11 @@ export class InvariantEvaluator {
 
     // 3. Payment settlement: settlement_confirmed == true
     if (expr.includes("settlement_confirmed")) {
-      const confirmed = Boolean(data?.settlement_confirmed);
+      // Must be strictly boolean true, not truthy string like "false"
+      const confirmed = data?.settlement_confirmed === true || data?.settlement_confirmed === "true";
       return {
         passed: confirmed,
-        actualValue: { settlement_confirmed: confirmed },
+        actualValue: { settlement_confirmed: data?.settlement_confirmed },
         message: confirmed ? "Settlement confirmed before ledger commit" : "Settlement confirmation missing prior to commit",
       };
     }

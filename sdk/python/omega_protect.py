@@ -200,10 +200,21 @@ class CEGISPythonEngine:
                 f"{target_path[-1]} / 100"
             )
 
+        # Syntax Gatekeeper: Defend against the "Broken Build" Syntax Trap
+        # Candidate MUST compile cleanly with 0 syntax or indentation errors
+        try:
+            compiled_code = compile(patched_source, file_path or "<repaired>", "exec")
+        except SyntaxError as e:
+            # Reject candidate: NEVER emit a patch with unclosed brackets or indentation errors
+            return {
+                "repair_found": False,
+                "error": f"Syntax Gatekeeper rejected candidate: {e}",
+            }
+
         # Invariant Verification in isolated sandbox namespace
         sandbox_scope: Dict[str, Any] = {}
         try:
-            exec(patched_source, sandbox_scope)
+            exec(compiled_code, sandbox_scope)
         except Exception:
             pass
 
@@ -237,13 +248,26 @@ class CEGISPythonEngine:
 
 # ─── Invariant & Error Classification ───────────────────────────────────────
 
+def _parse_strict_number(val: Any) -> Optional[float]:
+    """Strictly parse numbers, defending against JSON type poisoning (None, malformed strings, NaN)."""
+    if val is None or val == "":
+        return None
+    try:
+        import math
+        f = float(val)
+        return f if not math.isnan(f) and not math.isinf(f) else None
+    except (ValueError, TypeError):
+        return None
+
 def evaluate_invariant(expr: str, data: Any) -> bool:
-    """Evaluate business and financial constraints."""
+    """Evaluate business and financial constraints with JSON type poisoning defense."""
     expr = expr.strip()
     if expr == "debits == credits":
         if isinstance(data, dict):
-            d = float(data.get("debits", 0))
-            c = float(data.get("credits", 0))
+            d = _parse_strict_number(data.get("debits"))
+            c = _parse_strict_number(data.get("credits"))
+            if d is None or c is None:
+                return False  # Reject type poisoned values (null/empty/unparseable strings)
             return abs(d - c) < 0.001
         return False
     if "confidence >=" in expr:

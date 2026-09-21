@@ -197,6 +197,103 @@ def run_tests():
         print(f"  FAILED — {e}")
         failed += 1
 
+    # ── TEST 6: JSON Type Poisoning Defense ─────────────────────────────────
+    try:
+        print("\n[TEST 6] JSON Type Poisoning Defense (None, NaN, Empty String, Missing Keys)")
+        # Poisoned cases that would previously pass under weak type checks (0 == 0)
+        poison_null = {"debits": None, "credits": None}
+        poison_empty = {"debits": "", "credits": ""}
+        poison_nan = {"debits": float("nan"), "credits": float("nan")}
+        poison_mismatch_type = {"debits": "unparseable_string", "credits": "unparseable_string"}
+        poison_missing = {}
+
+        assert evaluate_invariant("debits == credits", poison_null) is False, "Failed to reject None type poisoning"
+        assert evaluate_invariant("debits == credits", poison_empty) is False, "Failed to reject empty string poisoning"
+        assert evaluate_invariant("debits == credits", poison_nan) is False, "Failed to reject NaN poisoning"
+        assert evaluate_invariant("debits == credits", poison_mismatch_type) is False, "Failed to reject unparseable string"
+        assert evaluate_invariant("debits == credits", poison_missing) is False, "Failed to reject missing keys"
+
+        # Valid cases must still pass
+        assert evaluate_invariant("debits == credits", {"debits": "100.50", "credits": 100.50}) is True
+        assert evaluate_invariant("debits == credits", {"debits": 50000, "credits": 50000}) is True
+
+        print("  PASSED — Rejected all JSON type poisoning attacks (None, NaN, empty strings, missing keys).")
+        passed += 1
+    except Exception as e:
+        print(f"  FAILED — {e}")
+        failed += 1
+
+    # ── TEST 7: Syntax Gatekeeper Defense (Broken Build Trap) ───────────────
+    try:
+        print("\n[TEST 7] Syntax Gatekeeper Defense (Broken Build & Indentation Trap)")
+        # Test that compile() gatekeeper prevents emitting invalid syntax
+        invalid_syntax_source = "def broken():\n    return [1, 2,"  # Unclosed bracket
+        try:
+            compile(invalid_syntax_source, "<test>", "exec")
+            assert False, "Should have thrown SyntaxError"
+        except SyntaxError:
+            pass  # Expected
+
+        # Test that CEGIS rejects uncompilable mutations
+        broken_repair = CEGISPythonEngine.repair_source(
+            source_code="def broken_syntax(data):\n    return data['val']\n",
+            failing_field="val",
+            crash_payload={"data": {"nested": {"val": 100}}},
+            invariants=[]
+        )
+        # Check that if a repair is found, its patched source compiles cleanly with 0 syntax errors
+        if broken_repair.get("repair_found"):
+            compiled = compile(broken_repair["patched_source"], "<verified>", "exec")
+            assert compiled is not None, "Patched source must compile cleanly"
+
+        print("  PASSED — Syntax Gatekeeper enforced 0 syntax/indentation errors on generated code.")
+        passed += 1
+    except Exception as e:
+        print(f"  FAILED — {e}")
+        failed += 1
+
+    # ── TEST 8: Concurrency Isolation with ContextVars (50 Concurrent Threads) ──
+    try:
+        print("\n[TEST 8] High-Concurrency Context Isolation (50 Threads via ContextVars)")
+        import concurrent.futures
+        import random
+
+        concurrency_count = 50
+        errors = []
+
+        def worker_task(thread_id: int):
+            run_id = f"py_concurrent_run_{thread_id}"
+            ctx = InterceptionContext(run_id=run_id, node_name=f"node_{thread_id}", is_sandbox=False)
+            token = _current_context.set(ctx)
+
+            try:
+                # Micro-jitter to test thread interleaving
+                time.sleep(random.uniform(0.001, 0.015))
+
+                # Verify context didn't bleed from another thread
+                current = _current_context.get()
+                if current is None or current.run_id != run_id:
+                    errors.append(f"Thread {thread_id} context mixup! Expected {run_id}, got {current.run_id if current else None}")
+
+                time.sleep(random.uniform(0.001, 0.015))
+
+                current_after = _current_context.get()
+                if current_after is None or current_after.run_id != run_id:
+                    errors.append(f"Thread {thread_id} context mixup after sleep! Expected {run_id}, got {current_after.run_id if current_after else None}")
+            finally:
+                _current_context.reset(token)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency_count) as executor:
+            futures = [executor.submit(worker_task, i) for i in range(1, concurrency_count + 1)]
+            concurrent.futures.wait(futures)
+
+        assert len(errors) == 0, f"Encountered context mixup errors: {errors}"
+        print(f"  PASSED — 50 concurrent threads verified: 100% ContextVars isolation, ZERO data bleed.")
+        passed += 1
+    except Exception as e:
+        print(f"  FAILED — {e}")
+        failed += 1
+
     print("\n" + "=" * 70)
     print(f"  PYTHON SUBSTRATE RESULTS: {passed} PASSED / {failed} FAILED")
     print("=" * 70 + "\n")

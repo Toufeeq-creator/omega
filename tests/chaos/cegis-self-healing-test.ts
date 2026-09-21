@@ -13,6 +13,7 @@ import {
   parseAST,
 } from "../../src/recovery/cegis-engine.ts";
 import { PrattParser, CodeGenerator } from "../../src/recovery/ast-parser.ts";
+import { InvariantEvaluator } from "../../src/recovery/invariant-eval.ts";
 
 // Colors for terminal reporting
 const c = {
@@ -282,6 +283,82 @@ async function runCEGISTestSuite() {
     console.log(`  ${c.green}PASSED${c.reset} — Pratt AST parsed statement, optional bracket chain, arithmetic, and unparsed cleanly:`);
     console.log(`  ${c.yellow}         Input:  ${sourceCode}${c.reset}`);
     console.log(`  ${c.yellow}         Output: ${unparsed}${c.reset}`);
+    passed++;
+  } catch (err: any) {
+    console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
+    failed++;
+  }
+
+  // ── TEST 8: Syntax Trap Defense — Rejection of Broken Brackets & Malformed ASTs ──
+  try {
+    console.log(`\n${c.cyan}[TEST 8]${c.reset} Syntax Trap Defense — Rejection of Unclosed Brackets & Broken ASTs`);
+
+    // 1. Pratt Parser must reject unclosed delimiters
+    let caughtParen = false;
+    try {
+      parseAST("(data.amount + 10");
+    } catch (e: any) {
+      caughtParen = true;
+    }
+    if (!caughtParen) throw new Error("PrattParser failed to reject unclosed parenthesis");
+
+    let caughtBracket = false;
+    try {
+      parseAST('data["amount"');
+    } catch (e: any) {
+      caughtBracket = true;
+    }
+    if (!caughtBracket) throw new Error("PrattParser failed to reject unclosed bracket");
+
+    let caughtTrailing = false;
+    try {
+      parseAST("data.amount +");
+    } catch (e: any) {
+      caughtTrailing = true;
+    }
+    if (!caughtTrailing) throw new Error("PrattParser failed to reject trailing operator");
+
+    console.log(`  ${c.green}PASSED${c.reset} — Pratt AST strictly rejected unclosed parens, unclosed brackets, and trailing operators.`);
+    passed++;
+  } catch (err: any) {
+    console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
+    failed++;
+  }
+
+  // ── TEST 9: Invariant Engine — JSON Type Poisoning Defense ───────────────
+  try {
+    console.log(`\n${c.cyan}[TEST 9]${c.reset} Invariant Engine — JSON Type Poisoning Defense (Null, NaN, Malformed Strings)`);
+
+    // Financial balance: debits == credits
+    // In naive JS: null == null, 0 == 0, undefined == undefined, "" == ""
+    const nullPayload = { debits: null, credits: null };
+    const emptyPayload = { debits: "", credits: "" };
+    const nanPayload = { debits: NaN, credits: NaN };
+    const missingPayload = {};
+    const stringCoercion = { debits: "invalid_number", credits: "invalid_number" };
+
+    const resNull = InvariantEvaluator.evaluateExpression("debits == credits", nullPayload);
+    if (resNull.passed) throw new Error("JSON Type Poisoning: null values falsely evaluated as balanced!");
+
+    const resEmpty = InvariantEvaluator.evaluateExpression("debits == credits", emptyPayload);
+    if (resEmpty.passed) throw new Error("JSON Type Poisoning: empty string values falsely evaluated as balanced!");
+
+    const resNaN = InvariantEvaluator.evaluateExpression("debits == credits", nanPayload);
+    if (resNaN.passed) throw new Error("JSON Type Poisoning: NaN values falsely evaluated as balanced!");
+
+    const resMissing = InvariantEvaluator.evaluateExpression("debits == credits", missingPayload);
+    if (resMissing.passed) throw new Error("JSON Type Poisoning: missing values falsely evaluated as balanced!");
+
+    const resStr = InvariantEvaluator.evaluateExpression("debits == credits", stringCoercion);
+    if (resStr.passed) throw new Error("JSON Type Poisoning: unparseable strings falsely evaluated as balanced!");
+
+    // Valid numeric strings and numbers must pass
+    const validNumericString = { debits: "50000.00", credits: 50000.00 };
+    const resValid = InvariantEvaluator.evaluateExpression("debits == credits", validNumericString);
+    if (!resValid.passed) throw new Error("Valid numeric string failed strict evaluation!");
+
+    console.log(`  ${c.green}PASSED${c.reset} — Strict numerical evaluation rejected null, NaN, empty strings, and missing keys.`);
+    console.log(`  ${c.yellow}         Financial ledger balance cannot be tricked by JSON type poisoning.${c.reset}`);
     passed++;
   } catch (err: any) {
     console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
