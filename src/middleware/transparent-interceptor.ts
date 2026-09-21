@@ -76,14 +76,34 @@ let originalHttpsRequest: typeof https.request | null = null;
 /** Guard flag — ensures instrumentation is applied exactly once */
 let isInstrumented = false;
 
-// ─── Signature Hashing ────────────────────────────────────────────────────
+// ─── Signature Hashing & Canonicalization ─────────────────────────────────
+
+/**
+ * Canonicalize and normalize a URL to defend against Dynamic DNS / Anycast Routing Key Mismatches.
+ * Strips host IP resolution dependencies and sorts query parameters so that
+ * anycast/geo-routing shifts and parameter permutations resolve to the identical signature.
+ */
+export function normalizeCanonicalUrl(urlStr: string): string {
+  try {
+    const parsed = new URL(urlStr);
+    const sortedParams = Array.from(parsed.searchParams.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+    const search = sortedParams.length > 0 
+      ? "?" + sortedParams.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&")
+      : "";
+    // Lowercase hostname, normalize default ports, strip credentials/fragments
+    return `${parsed.protocol.toLowerCase()}//${parsed.hostname.toLowerCase()}${parsed.port ? `:${parsed.port}` : ""}${parsed.pathname}${search}`;
+  } catch {
+    return urlStr;
+  }
+}
 
 /**
  * Generate a deterministic SHA-256 signature hash from a request.
- * Used to match recorded calls during sandbox replay.
+ * Canonicalizes URLs to eliminate Anycast/DNS routing discrepancies.
  */
-function computeSignatureHash(method: string, url: string, bodyHash?: string): string {
-  const content = `${method.toUpperCase()}|${url}|${bodyHash || "NOBODY"}`;
+export function computeSignatureHash(method: string, url: string, bodyHash?: string): string {
+  const canonicalUrl = normalizeCanonicalUrl(url);
+  const content = `${method.toUpperCase()}|${canonicalUrl}|${bodyHash || "NOBODY"}`;
   return createHash("sha256").update(content).digest("hex").slice(0, 16);
 }
 
@@ -140,6 +160,12 @@ export class TransparentNetworkInterceptor {
         return capturedOriginal.call(globalThis, input, init);
       }
 
+      // ── Client-Side Timeout (AbortController) Race Condition Defense ──
+      const signal = init?.signal || (input instanceof Request ? input.signal : undefined);
+      if (signal?.aborted) {
+        throw new DOMException("This operation was aborted", "AbortError");
+      }
+
       // Extract request metadata
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
       const method = init?.method || (input instanceof Request ? input.method : "GET");
@@ -155,12 +181,24 @@ export class TransparentNetworkInterceptor {
 
       // ── Sandbox mode → return recorded/virtualized response ──
       if (ctx.isSandbox) {
+        if (signal?.aborted) {
+          throw new DOMException("This operation was aborted", "AbortError");
+        }
         return TransparentNetworkInterceptor.virtualizeCall(ctx, sigHash, method, url);
       }
 
       // ── Live mode → execute real fetch, record result ──
       const startTime = Date.now();
-      const response = await capturedOriginal.call(globalThis, input, effectiveInit);
+      let response: Response;
+      try {
+        response = await capturedOriginal.call(globalThis, input, effectiveInit);
+      } catch (fetchErr: any) {
+        // If aborted during flight, re-throw immediately without hanging or attempting stream reads
+        if (signal?.aborted || fetchErr.name === "AbortError") {
+          throw fetchErr;
+        }
+        throw fetchErr;
+      }
       const duration = Date.now() - startTime;
 
       // ── Double Stream Consumption Defense ──

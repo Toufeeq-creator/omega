@@ -31,6 +31,9 @@ export class SqliteOmegaStore implements WorkflowStore, RunStore, JournalStore, 
         PRAGMA journal_mode = WAL;
         PRAGMA busy_timeout = 10000;
         PRAGMA synchronous = NORMAL;
+        PRAGMA wal_autocheckpoint = 1000;
+        PRAGMA journal_size_limit = 67108864;
+        PRAGMA quick_check;
       `);
     } catch {
       // Memory DBs ignore some WAL pragmas
@@ -216,5 +219,19 @@ export class SqliteOmegaStore implements WorkflowStore, RunStore, JournalStore, 
     `);
     const row = stmt.get(runId) as { id: string; state_json: string } | undefined;
     return row ? { checkpointId: row.id, state: JSON.parse(row.state_json) } : null;
+  }
+
+  /**
+   * Run explicit WAL checkpoint to truncate or flush the .db-wal file,
+   * preventing unbounded disk growth and disk space exhaustion mid-write.
+   */
+  async checkpoint(mode: "PASSIVE" | "FULL" | "RESTART" | "TRUNCATE" = "PASSIVE"): Promise<void> {
+    return this.enqueueWrite(() => {
+      try {
+        this.db.exec(`PRAGMA wal_checkpoint(${mode});`);
+      } catch {
+        // Ignored on memory DBs
+      }
+    });
   }
 }

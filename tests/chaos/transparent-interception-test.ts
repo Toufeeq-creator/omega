@@ -556,6 +556,63 @@ async function runTransparentInterceptionTests() {
     failed++;
   }
 
+  // ── TEST 11: Dynamic DNS / Anycast Routing Key Normalization ──
+  try {
+    console.log(`\n${c.cyan}[TEST 11]${c.reset} Dynamic DNS / Anycast Routing Key Normalization`);
+    const { computeSignatureHash, normalizeCanonicalUrl } = await import("../../src/middleware/transparent-interceptor.ts");
+
+    const url1 = "https://API.Stripe.COM:443/v1/charges?limit=10&customer=cus_123";
+    const url2 = "https://api.stripe.com/v1/charges?customer=cus_123&limit=10";
+
+    const hash1 = computeSignatureHash("GET", url1);
+    const hash2 = computeSignatureHash("GET", url2);
+
+    if (hash1 !== hash2) {
+      throw new Error(`Anycast Hash Mismatch: hash1(${hash1}) !== hash2(${hash2})`);
+    }
+
+    console.log(`  ${c.green}PASSED${c.reset} — Anycast geo-routing & query param permutations normalized: identical signature '${hash1}'`);
+    passed++;
+  } catch (err: any) {
+    console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
+    failed++;
+  }
+
+  // ── TEST 12: Client-Side Timeout (AbortController) Race Condition Defense ──
+  try {
+    console.log(`\n${c.cyan}[TEST 12]${c.reset} Client-Side Timeout (AbortController) Race Condition Defense`);
+    const controller = new AbortController();
+    controller.abort(); // Abort immediately to simulate client timeout
+
+    let abortCaught = false;
+    try {
+      await TransparentNetworkInterceptor.runWithContext(
+        "run_abort_race_test",
+        "timeout_node",
+        false,
+        async () => {
+          await fetch(`${serverUrl}/api/balance`, { signal: controller.signal });
+        }
+      );
+    } catch (abortErr: any) {
+      if (abortErr.name === "AbortError" || abortErr.message.includes("aborted")) {
+        abortCaught = true;
+      } else {
+        throw abortErr;
+      }
+    }
+
+    if (!abortCaught) {
+      throw new Error("Expected AbortError when AbortController signals timeout!");
+    }
+
+    console.log(`  ${c.green}PASSED${c.reset} — AbortController race condition safely trapped without hanging or corrupted state.`);
+    passed++;
+  } catch (err: any) {
+    console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
+    failed++;
+  }
+
   // ── Cleanup & Report ──
   store.close();
   await stopTestServer();

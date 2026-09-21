@@ -27,6 +27,11 @@ from omega_protect import (
     activate_transparent_interceptor,
     _current_context,
     InterceptionContext,
+    reload_module_for_file,
+    safe_serialize_json,
+    create_immutable_snapshot,
+    normalize_canonical_url,
+    _compute_sig,
 )
 
 # ─── Mock HTTP Server for Interception Test ──────────────────────────────────
@@ -329,6 +334,48 @@ def run_tests():
         assert evaluate_invariant("confidence >= 0.8", {}) is False
 
         print("  PASSED — Floating-point precision drift resolved via integer cent logic; safe navigation enforced.")
+        passed += 1
+    except Exception as e:
+        print(f"  FAILED — {e}")
+        failed += 1
+
+    # ── TEST 11: Deep Circular Reference Object Traversal Crash Defense ───────
+    try:
+        print("\n[TEST 11] Deep Circular Reference Object Traversal Crash Defense")
+        circ: Dict[str, Any] = {"debits": 500.0, "credits": 500.0}
+        circ["self"] = circ  # Circular pointer
+        circ["nested"] = {"parent": circ}
+
+        # Safe serialization must not crash with RecursionError
+        serialized = safe_serialize_json(circ)
+        assert "[Circular]" in serialized, "Expected [Circular] token in serialized JSON"
+
+        # Invariant check must safely navigate circular dictionary without recursion crash
+        assert evaluate_invariant("debits == credits", circ) is True
+
+        print("  PASSED — Circular reference safely serialized & evaluated without RecursionError.")
+        passed += 1
+    except Exception as e:
+        print(f"  FAILED — {e}")
+        failed += 1
+
+    # ── TEST 12: Module Cache Reload & Anycast URL Canonicalization ───────────
+    try:
+        print("\n[TEST 12] Module Cache Invalidation & Anycast URL Canonicalization")
+
+        # 1. URL Canonicalization
+        url1 = "https://API.Stripe.COM:443/v1/charges?limit=10&customer=cus_123"
+        url2 = "https://api.stripe.com/v1/charges?customer=cus_123&limit=10"
+        sig1 = _compute_sig("GET", url1)
+        sig2 = _compute_sig("GET", url2)
+        assert sig1 == sig2, f"Expected identical signature hashes for Anycast URLs, got {sig1} vs {sig2}"
+
+        # 2. Module cache reload
+        import omega_protect as op_mod
+        reloaded = reload_module_for_file(op_mod.__file__)
+        assert reloaded is True, "Expected reload_module_for_file to find and reload loaded module in sys.modules"
+
+        print(f"  PASSED — Anycast URL canonicalized to '{sig1}'; module cache cleanly reloaded.")
         passed += 1
     except Exception as e:
         print(f"  FAILED — {e}")

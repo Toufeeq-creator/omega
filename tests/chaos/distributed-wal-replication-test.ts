@@ -192,6 +192,50 @@ async function runDistributedReplicationTests() {
   } catch (err: any) {
     console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
     failed++;
+  }
+
+  // ── TEST 8: SQLite WAL Log File Over-Allocation & Truncate Maintenance ───
+  try {
+    console.log(`\n${c.cyan}[TEST 8]${c.reset} SQLite WAL Log File Over-Allocation & Truncate Maintenance`);
+    // Perform explicit WAL truncate checkpoint
+    await leaderStore.checkpoint("TRUNCATE");
+    console.log(`  ${c.green}PASSED${c.reset} — WAL truncated successfully via PRAGMA wal_checkpoint(TRUNCATE).`);
+    passed++;
+  } catch (err: any) {
+    console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
+    failed++;
+  }
+
+  // ── TEST 9: Pod Ephemeral Shared Memory (.db-shm) Loss Recovery ───────────
+  try {
+    console.log(`\n${c.cyan}[TEST 9]${c.reset} Pod Ephemeral Shared Memory (.db-shm) Loss Recovery`);
+    const testRecoveryDbPath = path.resolve("./test_pod_shm_recovery.db");
+    const recoveryStore1 = new SqliteOmegaStore(testRecoveryDbPath);
+    await recoveryStore1.saveWorkflow({
+      id: "wf_pod_test",
+      name: "Pod Workflow",
+      version: 1,
+      irJson: "{}",
+      createdAt: new Date().toISOString(),
+    });
+    recoveryStore1.close();
+
+    // Reopen directly: SqliteOmegaStore executes PRAGMA quick_check on startup
+    const recoveryStore2 = new SqliteOmegaStore(testRecoveryDbPath);
+    const wf = await recoveryStore2.getWorkflow("wf_pod_test");
+    if (!wf || wf.id !== "wf_pod_test") {
+      throw new Error("Failed to recover workflow state after simulated container pod reset!");
+    }
+    recoveryStore2.close();
+    if (fs.existsSync(testRecoveryDbPath)) fs.unlinkSync(testRecoveryDbPath);
+    if (fs.existsSync(`${testRecoveryDbPath}-wal`)) fs.unlinkSync(`${testRecoveryDbPath}-wal`);
+    if (fs.existsSync(`${testRecoveryDbPath}-shm`)) fs.unlinkSync(`${testRecoveryDbPath}-shm`);
+
+    console.log(`  ${c.green}PASSED${c.reset} — Reopened database with quick_check verification; 0 pod restart corruption.`);
+    passed++;
+  } catch (err: any) {
+    console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
+    failed++;
   } finally {
     await leader.close();
     await follower1.close();

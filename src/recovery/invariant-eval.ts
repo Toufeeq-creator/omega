@@ -59,6 +59,99 @@ export class InvariantEvaluator {
     };
   }
 
+  private static isEvaluatingInvariants = false;
+
+  /**
+   * Defend against Re-entrancy Loops via User-Defined Invariant Callbacks.
+   * Prevents recursive callbacks from exhausting memory or overflowing call stack.
+   */
+  static evaluateWithReentrancyGuard<T>(fn: () => T): T {
+    if (this.isEvaluatingInvariants) {
+      throw new Error("ReentrancyError: Invariant callback triggered a re-entrant execution loop. Aborting to prevent memory exhaustion.");
+    }
+    this.isEvaluatingInvariants = true;
+    try {
+      return fn();
+    } finally {
+      this.isEvaluatingInvariants = false;
+    }
+  }
+
+  /**
+   * Serialize an arbitrary object graph with circular reference protection.
+   * Defends against Deep Circular Reference Object Traversal Crashes (RangeError / Maximum call stack).
+   */
+  static safeSerialize(obj: unknown): string {
+    const seen = new WeakSet();
+    try {
+      return JSON.stringify(obj, (key, value) => {
+        if (typeof value === "object" && value !== null) {
+          if (seen.has(value)) {
+            return "[Circular]";
+          }
+          seen.add(value);
+        }
+        return value;
+      });
+    } catch {
+      return "[Unserializable Object]";
+    }
+  }
+
+  /**
+   * Cycle-safe deep clone helper.
+   */
+  static cloneCycleSafe<T>(obj: T): T {
+    if (obj === null || typeof obj !== "object") return obj;
+    const seen = new WeakMap();
+
+    function copy(target: any): any {
+      if (target === null || typeof target !== "object") return target;
+      if (seen.has(target)) return seen.get(target);
+
+      const res: any = Array.isArray(target) ? [] : {};
+      seen.set(target, res);
+      for (const [k, v] of Object.entries(target)) {
+        res[k] = copy(v);
+      }
+      return res;
+    }
+
+    return copy(obj);
+  }
+
+  /**
+   * Deeply freeze an object graph, defending against Time-of-Check to Time-of-Use (TOCTOU) Memory State Races.
+   * Prevents concurrent async operations from modifying state while or after invariants are verified.
+   */
+  static createImmutableSnapshot<T>(obj: T): Readonly<T> {
+    if (obj === null || typeof obj !== "object") return obj;
+    const seen = new WeakSet();
+
+    function deepFreeze(target: any) {
+      if (target === null || typeof target !== "object" || Object.isFrozen(target)) return;
+      if (seen.has(target)) return;
+      seen.add(target);
+
+      for (const key of Object.getOwnPropertyNames(target)) {
+        const val = target[key];
+        if (val !== null && typeof val === "object") {
+          deepFreeze(val);
+        }
+      }
+      Object.freeze(target);
+    }
+
+    let clone: any;
+    try {
+      clone = structuredClone(obj);
+    } catch {
+      clone = InvariantEvaluator.cloneCycleSafe(obj);
+    }
+    deepFreeze(clone);
+    return clone;
+  }
+
   /**
    * Directly evaluate an invariant expression against a data payload.
    * Defends against JSON Type Poisoning.
@@ -67,7 +160,7 @@ export class InvariantEvaluator {
     expression: string,
     data: any
   ): { passed: boolean; actualValue?: unknown; message?: string } {
-    return this.checkExpression(expression, data);
+    return InvariantEvaluator.evaluateWithReentrancyGuard(() => this.checkExpression(expression, data));
   }
 
   /**
@@ -124,7 +217,7 @@ export class InvariantEvaluator {
           return {
             passed: false,
             actualValue: { debits: data?.debits, credits: data?.credits },
-            message: `JSON Type Poisoning detected: debits or credits is not a valid finite number (debits: ${JSON.stringify(data?.debits)}, credits: ${JSON.stringify(data?.credits)})`,
+            message: `JSON Type Poisoning detected: debits or credits is not a valid finite number (debits: ${InvariantEvaluator.safeSerialize(data?.debits)}, credits: ${InvariantEvaluator.safeSerialize(data?.credits)})`,
           };
         }
 
@@ -149,7 +242,7 @@ export class InvariantEvaluator {
         return {
           passed: false,
           actualValue: { confidence: data?.confidence },
-          message: `Type error: confidence value is not a valid number (received: ${JSON.stringify(data?.confidence)})`,
+          message: `Type error: confidence value is not a valid number (received: ${InvariantEvaluator.safeSerialize(data?.confidence)})`,
         };
       }
       const passed = conf >= 0.8;

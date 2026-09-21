@@ -470,6 +470,94 @@ async function runCEGISTestSuite() {
     failed++;
   }
 
+  // ── TEST 13: Deep Circular Reference Object Traversal Crash Defense ──────
+  try {
+    console.log(`\n${c.cyan}[TEST 13]${c.reset} Deep Circular Reference Object Traversal Crash Defense`);
+    const circularObj: any = { debits: 500, credits: 500 };
+    circularObj.self = circularObj; // Direct circular pointer
+    circularObj.nested = { parent: circularObj }; // Indirect circular pointer
+
+    // 1. Invariant check must NOT crash with "Maximum call stack size exceeded"
+    const resCircular = InvariantEvaluator.evaluateExpression("debits == credits", circularObj);
+    if (!resCircular.passed) {
+      throw new Error("Invariant failed on valid debits/credits within circular object graph");
+    }
+
+    // 2. Safe serializer must convert cycle to [Circular] token
+    const serialized = InvariantEvaluator.safeSerialize(circularObj);
+    if (!serialized.includes("[Circular]")) {
+      throw new Error("Expected [Circular] marker in serialized circular object!");
+    }
+
+    console.log(`  ${c.green}PASSED${c.reset} — Circular reference safely traversed with WeakSet guard (zero stack overflow).`);
+    passed++;
+  } catch (err: any) {
+    console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
+    failed++;
+  }
+
+  // ── TEST 14: Re-entrancy Loops via User-Defined Invariant Callbacks Defense ─
+  try {
+    console.log(`\n${c.cyan}[TEST 14]${c.reset} Re-entrancy Loops via User-Defined Invariant Callbacks Defense`);
+    let reentrancyCaught = false;
+
+    try {
+      InvariantEvaluator.evaluateWithReentrancyGuard(() => {
+        // Nested re-entrant callback attempt
+        InvariantEvaluator.evaluateWithReentrancyGuard(() => {
+          return true;
+        });
+      });
+    } catch (reErr: any) {
+      if (reErr.message.includes("ReentrancyError")) {
+        reentrancyCaught = true;
+      }
+    }
+
+    if (!reentrancyCaught) {
+      throw new Error("Expected ReentrancyError on nested recursive invariant callback!");
+    }
+
+    console.log(`  ${c.green}PASSED${c.reset} — Re-entrancy guard trapped recursive callback loop before memory exhaustion.`);
+    passed++;
+  } catch (err: any) {
+    console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
+    failed++;
+  }
+
+  // ── TEST 15: Time-of-Check to Time-of-Use (TOCTOU) Memory State Race Defense ─
+  try {
+    console.log(`\n${c.cyan}[TEST 15]${c.reset} Time-of-Check to Time-of-Use (TOCTOU) Memory State Race Defense`);
+    const liveAccountState = {
+      accountId: "acc_9921",
+      balance: 10000.0,
+      currency: "USD",
+      meta: { verified: true },
+    };
+
+    // Capture frozen snapshot for invariant gate
+    const snapshot = InvariantEvaluator.createImmutableSnapshot(liveAccountState);
+
+    // Verify snapshot is frozen
+    if (!Object.isFrozen(snapshot) || !Object.isFrozen(snapshot.meta)) {
+      throw new Error("Immutable snapshot is not deeply frozen!");
+    }
+
+    // Concurrent thread attempts to tamper with live object:
+    liveAccountState.balance = 0.0;
+
+    // Snapshot retains validated state unconditionally
+    if (snapshot.balance !== 10000.0) {
+      throw new Error("TOCTOU Race! Snapshot was mutated by concurrent operation!");
+    }
+
+    console.log(`  ${c.green}PASSED${c.reset} — Immutable snapshot deeply frozen; immune to TOCTOU concurrent memory mutation.`);
+    passed++;
+  } catch (err: any) {
+    console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
+    failed++;
+  }
+
   console.log(`\n${c.bold}${c.magenta}${"═".repeat(78)}${c.reset}`);
   console.log(`${c.bold}  CEGIS SELF-HEALING RESULTS: ${c.green}${passed} PASSED${c.reset} / ${failed > 0 ? c.red : c.green}${failed} FAILED${c.reset}`);
   console.log(`${c.bold}${c.magenta}${"═".repeat(78)}${c.reset}\n`);

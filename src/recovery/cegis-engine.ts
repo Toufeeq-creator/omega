@@ -701,11 +701,14 @@ export async function withAdvisoryFileLock<T>(filePath: string, fn: () => Promis
   const maxWaitMs = 5000;
   const start = Date.now();
 
-  while (!acquired) {
+    while (!acquired) {
     try {
       const fd = fs.openSync(lockFile, "wx");
-      fs.writeSync(fd, `${process.pid}\n${Date.now()}`);
-      fs.closeSync(fd);
+      try {
+        fs.writeSync(fd, `${process.pid}\n${Date.now()}`);
+      } finally {
+        fs.closeSync(fd);
+      }
       acquired = true;
     } catch (err: any) {
       if (err.code === "EEXIST") {

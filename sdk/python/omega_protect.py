@@ -16,6 +16,9 @@ import difflib
 import functools
 import hashlib
 import io
+import json
+import os
+import sys
 import time
 import urllib.request
 import uuid
@@ -59,8 +62,25 @@ _current_context = contextvars.ContextVar[Optional[InterceptionContext]]("omega_
 _original_urlopen = urllib.request.urlopen
 _is_intercepted = False
 
+def normalize_canonical_url(url: str) -> str:
+    """Canonicalize URL, sorting query parameters and stripping IP/DNS routing dependencies."""
+    from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+    try:
+        parsed = urlparse(url)
+        query_pairs = sorted(parse_qsl(parsed.query))
+        canonical_query = urlencode(query_pairs)
+        netloc = parsed.netloc.lower()
+        if netloc.endswith(":443") and parsed.scheme.lower() == "https":
+            netloc = netloc[:-4]
+        elif netloc.endswith(":80") and parsed.scheme.lower() == "http":
+            netloc = netloc[:-3]
+        return urlunparse((parsed.scheme.lower(), netloc, parsed.path, parsed.params, canonical_query, ""))
+    except Exception:
+        return url
+
 def _compute_sig(method: str, url: str) -> str:
-    content = f"{method.upper()}|{url}"
+    canonical = normalize_canonical_url(url)
+    content = f"{method.upper()}|{canonical}"
     return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
 
 class _VirtualHTTPResponse(io.BytesIO):
@@ -265,6 +285,58 @@ class CEGISPythonEngine:
                 "attestation_signature": attestation_sig,
             }
         }
+
+def reload_module_for_file(file_path: str) -> bool:
+    """
+    Invalidate Python import caches and reload any cached module in sys.modules
+    that corresponds to the patched file, preventing stale bytecode execution.
+    """
+    import importlib
+    import importlib.util
+    importlib.invalidate_caches()
+    abs_path = os.path.abspath(file_path)
+    reloaded = False
+    for mod_name, mod in list(sys.modules.items()):
+        if mod_name == "__main__":
+            continue
+        mod_file = getattr(mod, "__file__", None)
+        if mod_file and os.path.abspath(mod_file) == abs_path:
+            try:
+                importlib.reload(mod)
+                reloaded = True
+            except Exception:
+                pass
+    return reloaded
+
+def safe_serialize_json(data: Any) -> str:
+    """Serialize object to JSON safely with circular reference detection to prevent recursion limits."""
+    visited = set()
+
+    def sanitize(obj: Any) -> Any:
+        oid = id(obj)
+        if oid in visited:
+            return "[Circular]"
+        if isinstance(obj, dict):
+            visited.add(oid)
+            return {str(k): sanitize(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple, set, frozenset)):
+            visited.add(oid)
+            return [sanitize(item) for item in obj]
+        return obj
+
+    try:
+        cleaned = sanitize(data)
+        return json.dumps(cleaned)
+    except Exception:
+        return "[Unserializable Object]"
+
+def create_immutable_snapshot(data: Any) -> Any:
+    """Create a deep copy snapshot to prevent Time-of-Check to Time-of-Use concurrent mutation."""
+    import copy
+    try:
+        return copy.deepcopy(data)
+    except Exception:
+        return data
 
 # ─── Invariant & Error Classification ───────────────────────────────────────
 
