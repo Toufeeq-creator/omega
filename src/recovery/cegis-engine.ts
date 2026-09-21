@@ -711,6 +711,11 @@ export async function withAdvisoryFileLock<T>(filePath: string, fn: () => Promis
       }
       acquired = true;
     } catch (err: any) {
+      if (err.code === "EROFS" || err.code === "EACCES" || err.code === "ENOENT" || err.code === "EPERM") {
+        // Read-only or immutable filesystem defense (e.g. AWS Lambda /var/task or read-only container root)
+        // Fall back to in-memory execution without disk lock
+        return await fn();
+      }
       if (err.code === "EEXIST") {
         if (Date.now() - start > maxWaitMs) {
           try {

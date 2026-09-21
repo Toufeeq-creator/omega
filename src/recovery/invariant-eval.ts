@@ -180,6 +180,10 @@ export class InvariantEvaluator {
     let current = obj;
     for (const part of parts) {
       if (current == null || typeof current !== "object") return undefined;
+      // Prototype Pollution Defense: strictly forbid navigating __proto__, constructor, prototype
+      if (part === "__proto__" || part === "constructor" || part === "prototype") {
+        return undefined;
+      }
       current = current[part];
     }
     return current;

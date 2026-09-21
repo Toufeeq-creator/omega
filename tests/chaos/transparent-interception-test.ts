@@ -613,6 +613,70 @@ async function runTransparentInterceptionTests() {
     failed++;
   }
 
+  // ── TEST 13: Volatile Nonce & Timestamp Masking in Replay Hashing ─────────
+  try {
+    console.log(`\n${c.cyan}[TEST 13]${c.reset} Volatile Nonce & Timestamp Masking in Replay Hashing`);
+    const { hashRequestBody } = await import("../../src/middleware/transparent-interceptor.ts");
+
+    const bodyLive = JSON.stringify({
+      amount: 50000,
+      timestamp: 1726928800123,
+      nonce: "nonce_abc_123",
+      request_id: "req_live_456",
+    });
+
+    const bodyReplay = JSON.stringify({
+      amount: 50000,
+      timestamp: 1726928805999, // 5 seconds later
+      nonce: "nonce_xyz_789", // newly generated
+      request_id: "req_replay_888", // newly generated
+    });
+
+    const hashLive = await hashRequestBody(bodyLive);
+    const hashReplay = await hashRequestBody(bodyReplay);
+
+    if (hashLive !== hashReplay) {
+      throw new Error(`Volatile token mismatch: live(${hashLive}) !== replay(${hashReplay})`);
+    }
+
+    console.log(`  ${c.green}PASSED${c.reset} — Dynamic timestamps/nonces masked: deterministic signature '${hashLive}' across runs.`);
+    passed++;
+  } catch (err: any) {
+    console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
+    failed++;
+  }
+
+  // ── TEST 14: Bounded Telemetry LRU Eviction Cap ───────────────────────────
+  try {
+    console.log(`\n${c.cyan}[TEST 14]${c.reset} Bounded Telemetry LRU Eviction Cap (1000 max entries)`);
+    const recordedCallsMap = new Map<string, any>();
+    // Pre-populate with 1000 entries
+    for (let i = 0; i < 1000; i++) {
+      recordedCallsMap.set(`sig_${i}`, { index: i });
+    }
+
+    await TransparentNetworkInterceptor.runWithContext(
+      "run_lru_cap_test",
+      "lru_node",
+      false,
+      async () => {
+        // Execute a fetch to push size to 1001
+        await fetch(`${serverUrl}/api/balance`);
+      },
+      recordedCallsMap
+    );
+
+    if (recordedCallsMap.size > 1000) {
+      throw new Error(`LRU Eviction failed: map size (${recordedCallsMap.size}) exceeded max ceiling of 1000!`);
+    }
+
+    console.log(`  ${c.green}PASSED${c.reset} — LRU eviction strictly enforced: telemetry memory ceiling capped at ${recordedCallsMap.size} entries.`);
+    passed++;
+  } catch (err: any) {
+    console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
+    failed++;
+  }
+
   // ── Cleanup & Report ──
   store.close();
   await stopTestServer();

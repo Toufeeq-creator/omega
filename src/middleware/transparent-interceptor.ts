@@ -108,10 +108,34 @@ export function computeSignatureHash(method: string, url: string, bodyHash?: str
 }
 
 /**
- * Hash the request body for signature computation.
- * Truncates at 64KB to prevent memory pressure from large payloads.
+ * Mask volatile tokens (nonces, timestamps, request IDs) to ensure deterministic
+ * cache replay hits even when requests embed dynamically generated epoch times or UUIDs.
  */
-async function hashRequestBody(body: BodyInit | null | undefined): Promise<string | undefined> {
+export function maskVolatileFields(obj: any): any {
+  if (!obj || typeof obj !== "object") return obj;
+  if (Array.isArray(obj)) return obj.map(maskVolatileFields);
+  const volatileKeys = new Set([
+    "timestamp", "ts", "nonce", "request_id", "requestid", 
+    "correlation_id", "idempotency_key", "created_at", "date"
+  ]);
+  const masked: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (volatileKeys.has(k.toLowerCase())) {
+      masked[k] = "[OMEGA_VOLATILE_TOKEN]";
+    } else if (typeof v === "object" && v !== null) {
+      masked[k] = maskVolatileFields(v);
+    } else {
+      masked[k] = v;
+    }
+  }
+  return masked;
+}
+
+/**
+ * Hash the request body for signature computation.
+ * Truncates at 64KB and masks volatile dynamic nonces/timestamps for deterministic replay.
+ */
+export async function hashRequestBody(body: BodyInit | null | undefined): Promise<string | undefined> {
   if (!body) return undefined;
 
   let text: string;
@@ -125,6 +149,15 @@ async function hashRequestBody(body: BodyInit | null | undefined): Promise<strin
     text = body.toString().slice(0, 65536);
   } else {
     return undefined;
+  }
+
+  // Volatile dynamic token normalization:
+  try {
+    const jsonParsed = JSON.parse(text);
+    const masked = maskVolatileFields(jsonParsed);
+    text = JSON.stringify(masked);
+  } catch {
+    // Non-JSON or binary text remains unmodified
   }
 
   return createHash("sha256").update(text).digest("hex").slice(0, 16);
@@ -234,6 +267,11 @@ export class TransparentNetworkInterceptor {
         durationMs: duration,
       };
 
+      // Bounded memory / LRU eviction cap: max 1000 recorded calls per context to prevent OOM in long-running daemons
+      if (ctx.recordedCalls.size >= 1000) {
+        const oldest = ctx.recordedCalls.keys().next().value;
+        if (oldest) ctx.recordedCalls.delete(oldest);
+      }
       ctx.recordedCalls.set(sigHash, record);
       ctx.callSequence.push(sigHash);
 

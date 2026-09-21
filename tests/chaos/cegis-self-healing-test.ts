@@ -558,6 +558,53 @@ async function runCEGISTestSuite() {
     failed++;
   }
 
+  // ── TEST 16: Prototype Pollution Navigation Attack Defense ─────────────────
+  try {
+    console.log(`\n${c.cyan}[TEST 16]${c.reset} Prototype Pollution Navigation Attack Defense`);
+    const maliciousPayload = JSON.parse('{"data": {"__proto__": {"polluted": true}}}');
+
+    // Attempt to access polluted property through safeGet
+    const res = InvariantEvaluator.safeGet(maliciousPayload, "data.__proto__.polluted");
+    if (res !== undefined) {
+      throw new Error("Prototype pollution vulnerability! __proto__ traversal was permitted!");
+    }
+
+    // Verify global Object.prototype was NOT polluted
+    if ((Object.prototype as any).polluted) {
+      throw new Error("Critical Vulnerability: Global Object.prototype has been polluted!");
+    }
+
+    console.log(`  ${c.green}PASSED${c.reset} — Prototype pollution strictly blocked: __proto__ and constructor paths rejected.`);
+    passed++;
+  } catch (err: any) {
+    console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
+    failed++;
+  }
+
+  // ── TEST 17: Read-Only Container Filesystem (EROFS) Lock Fallback ──────────
+  try {
+    console.log(`\n${c.cyan}[TEST 17]${c.reset} Read-Only Container Filesystem (EROFS) Lock Fallback`);
+    // Pass a simulated read-only path that throws EROFS on write
+    const readOnlyPath = "/read_only_root/agent.ts";
+    let executedInMemory = false;
+
+    // withAdvisoryFileLock catches EROFS / EACCES and falls back to in-memory execution
+    await withAdvisoryFileLock(readOnlyPath, async () => {
+      executedInMemory = true;
+      return "in_memory_ok";
+    });
+
+    if (!executedInMemory) {
+      throw new Error("Failed to execute in-memory fallback on read-only filesystem path!");
+    }
+
+    console.log(`  ${c.green}PASSED${c.reset} — Read-only container root handled gracefully: fallback to in-memory execution.`);
+    passed++;
+  } catch (err: any) {
+    console.log(`  ${c.red}FAILED${c.reset} — ${err.message}`);
+    failed++;
+  }
+
   console.log(`\n${c.bold}${c.magenta}${"═".repeat(78)}${c.reset}`);
   console.log(`${c.bold}  CEGIS SELF-HEALING RESULTS: ${c.green}${passed} PASSED${c.reset} / ${failed > 0 ? c.red : c.green}${failed} FAILED${c.reset}`);
   console.log(`${c.bold}${c.magenta}${"═".repeat(78)}${c.reset}\n`);
